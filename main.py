@@ -1,19 +1,26 @@
 """
-加密货币量化交易系统 v2.0
-工业级架构 · 全量数据 · ML Alpha · 智能执行 · 三层风控
+加密货币量化交易系统 v2.1
+工业级架构 · 全量数据 · 政体自适应策略 · 智能执行 · 三层风控
+
+v2.1 变更：
+  - 新增 --backtest-v2: 政体自适应回测（完整 FeatureEngine + Regime 过滤）
+  - 模拟/实盘交易从 ML 信号切换为 RegimeAdaptiveStrategy
+  - 回测与实盘共享同一策略逻辑，保证策略一致性
 
 用法:
-    python main.py                          # 模拟交易
+    python main.py                          # 模拟交易（Regime 策略）
     python main.py --live                   # 实盘交易
-    python main.py --backtest               # 回测
-    python main.py --validate-strategy      # 政体策略验证回测
-    python main.py --train                  # 仅训练模型
+    python main.py --backtest-v2            # 政体自适应回测
+    python main.py --backtest-v2 --no-regime # 对照组（关闭 regime）
+    python main.py --backtest               # 原版 ML 滚动窗口回测
+    python main.py --validate-strategy      # 政体策略 2 月验证回测
+    python main.py --train                  # 仅训练 ML 模型
     python main.py --sync-data              # 仅同步数据
     python main.py --validate               # 数据质量检查
-    python main.py --config path/to/cfg.yaml # 指定配置文件
 """
 import argparse
 import sys
+import time
 from pathlib import Path
 
 from config.loader import load_config
@@ -23,6 +30,11 @@ from data.storage import Storage
 from data.historical import HistoryDownloader
 from data.features import FeatureEngine
 from alpha.ml_model import AlphaModel
+from alpha.regime_strategy import (
+    RegimeAdaptiveStrategy, RegimeStrategyConfig, add_regime_column,
+    REGIME_BULL_TREND, REGIME_BULL_WEAK, REGIME_RANGE,
+    REGIME_BEAR_WEAK, REGIME_BEAR_TREND,
+)
 from utils.logger import get_logger
 from utils.metrics import generate_report, format_report
 
@@ -31,11 +43,202 @@ import pandas as pd
 
 logger = get_logger("main")
 
+
+# ═══════════════════════════════════════════════════════════════
+# Regime 策略初始化（注入到 TradingEngine）
+# ═══════════════════════════════════════════════════════════════
+
+def _init_regime_on_engine(engine: TradingEngine):
+    """
+    给 TradingEngine 实例注入 RegimeAdaptiveStrategy。
+    在 engine.warmup() 之前调用。
+    """
+    # 从 config 读取 regime 参数
+    regime_cfg_raw = {}
+    try:
+        if hasattr(engine.config, 'strategy') and hasattr(engine.config.strategy, '_data'):
+            regime_cfg_raw = engine.config.strategy._data.get("regime", {})
+        elif hasattr(engine.config, 'strategy'):
+            r = getattr(engine.config.strategy, 'regime', {})
+            if hasattr(r, '_data'):
+                regime_cfg_raw = r._data
+            elif isinstance(r, dict):
+                regime_cfg_raw = r
+    except Exception:
+        pass
+
+    cfg = RegimeStrategyConfig(
+        risk_per_trade=regime_cfg_raw.get("risk_per_trade", 0.03),
+        risk_per_trade_weak=regime_cfg_raw.get("risk_per_trade_weak", 0.015),
+        trailing_atr_mult=regime_cfg_raw.get("trailing_atr_mult", 2.5),
+        take_profit_atr_mult=regime_cfg_raw.get("take_profit_atr_mult", 4.0),
+        stop_atr_mult=regime_cfg_raw.get("stop_atr_mult", 2.0),
+        max_holding_bars=regime_cfg_raw.get("max_holding_bars", 30),
+        rsi_low=regime_cfg_raw.get("rsi_low", 35.0),
+        rsi_high=regime_cfg_raw.get("rsi_high", 65.0),
+        adx_min=regime_cfg_raw.get("adx_min", 18.0),
+        commission_pct=regime_cfg_raw.get("commission_pct", 0.001),
+        slippage_pct=regime_cfg_raw.get("slippage_pct", 0.001),
+    )
+
+    engine.regime_strategy = RegimeAdaptiveStrategy(cfg)
+    engine.regime_cfg = cfg
+    engine.regime_positions = {s: None for s in engine.symbols}
+
+    logger.info(f"RegimeAdaptiveStrategy 已注入 | "
+                f"risk={cfg.risk_per_trade} | trail={cfg.trailing_atr_mult}x")
+
+
+def _process_symbol_regime(engine: TradingEngine, symbol: str,
+                           prices: dict, nav: float):
+    """
+    用 RegimeAdaptiveStrategy 处理单标的信号（替代原版 _process_symbol）。
+
+    数据链路和 backtest_runner.py 完全一致：
+      FeatureEngine.compute_all() → add_regime_column() → should_enter/check_exit
+    """
+    df = engine.storage.get_klines(symbol, "1h")
+    if len(df) < 500:
+        logger.debug(f"{symbol} 数据不足 ({len(df)} 条)，跳过")
+        return
+
+    features = engine.feature_engine.compute_all(df)
+    if features.empty:
+        return
+    features = add_regime_column(features)
+
+    if len(features) < 2:
+        return
+    row = features.iloc[-1]
+    prev_row = features.iloc[-2]
+
+    close = row.get("close", 0)
+    regime = row.get("regime", REGIME_RANGE)
+    current_price = prices.get(symbol, close)
+
+    logger.info(
+        f"[{symbol}] regime={regime} | close={close:.2f} | "
+        f"rsi={row.get('rsi_14', 0):.1f} | adx={row.get('adx_14', 0):.1f}")
+
+    engine.storage.save_signal({
+        "symbol": symbol,
+        "timestamp": int(time.time() * 1000),
+        "strategy": "regime_adaptive",
+        "direction": regime,
+        "strength": row.get("adx_14", 0) / 100.0,
+        "confidence": 0.0,
+        "model_version": "regime_v2",
+    })
+
+    position = engine.regime_positions.get(symbol)
+    strategy = engine.regime_strategy
+    cfg = engine.regime_cfg
+
+    # ── 持仓中 → 检查出场 ──
+    if position is not None:
+        bar_count = position.get("bar_count", 0) + 1
+        position["bar_count"] = bar_count
+        position["highest_since_entry"] = max(
+            position["highest_since_entry"], current_price)
+
+        # 减仓
+        if strategy.check_partial_exit(row, position):
+            sell_qty = position["original_qty"] * cfg.partial_exit_pct
+            if sell_qty > 0 and sell_qty < position["qty"]:
+                result = engine.executor.execute(
+                    symbol, "SELL", sell_qty, current_price,
+                    strategy="regime_adaptive",
+                    algo=engine.config.execution.algo)
+                if result:
+                    position["qty"] -= sell_qty
+                    position["partial_done"] = True
+                    logger.info(f"[{symbol}] 减仓 {sell_qty:.6f} @ {current_price:.2f}")
+
+        # 出场
+        should_exit, reason = strategy.check_exit(row, position, bar_count)
+        if should_exit:
+            qty_to_sell = position["qty"]
+            ok, risk_reason = engine.risk_mgr.pre_trade_check(
+                symbol, "SELL", qty_to_sell, current_price, nav, prices)
+
+            if ok:
+                result = engine.executor.execute(
+                    symbol, "SELL", qty_to_sell, current_price,
+                    strategy="regime_adaptive",
+                    algo=engine.config.execution.algo)
+                if result:
+                    pnl_pct = current_price / position["entry_price"] - 1
+                    icon = "🟢" if pnl_pct > 0 else "🔴"
+                    logger.info(
+                        f"  {icon} [{symbol}] 平仓 @ {current_price:.2f} | "
+                        f"入={position['entry_price']:.2f} | "
+                        f"PnL={pnl_pct:+.1%} | {bar_count}bars | {reason}")
+                    engine.regime_positions[symbol] = None
+                    engine.risk_mgr.record_order()
+            else:
+                logger.warning(f"[{symbol}] 平仓风控拒绝: {risk_reason}")
+            return
+
+    # ── 无持仓 → 检查入场 ──
+    if position is None and strategy.should_enter(row, prev_row):
+        natr = row.get("natr_20", 0)
+        if pd.isna(natr) or natr <= 0:
+            return
+
+        qty, stop_loss = strategy.calc_position(nav, current_price, natr, regime)
+        if qty <= 0:
+            return
+
+        ok, risk_reason = engine.risk_mgr.pre_trade_check(
+            symbol, "BUY", qty, current_price, nav, prices)
+
+        if ok:
+            result = engine.executor.execute(
+                symbol, "BUY", qty, current_price,
+                strategy="regime_adaptive",
+                algo=engine.config.execution.algo)
+            if result:
+                atr_abs = natr * current_price
+                engine.regime_positions[symbol] = {
+                    "qty": qty,
+                    "original_qty": qty,
+                    "entry_price": current_price,
+                    "stop_loss": stop_loss,
+                    "highest_since_entry": current_price,
+                    "atr_at_entry": atr_abs,
+                    "entry_time": time.strftime("%Y-%m-%d %H:%M"),
+                    "regime": regime,
+                    "partial_done": False,
+                    "bar_count": 0,
+                }
+                logger.info(
+                    f"  🔵 [{symbol}] 开仓 @ {current_price:.2f} | "
+                    f"qty={qty:.6f} | {qty * current_price:.1f} USDT | "
+                    f"止损={stop_loss:.2f} | {regime}")
+                engine.risk_mgr.record_order()
+        else:
+            logger.info(f"[{symbol}] 开仓风控拒绝: {risk_reason}")
+
+
+# ═══════════════════════════════════════════════════════════════
+# CLI 命令
+# ═══════════════════════════════════════════════════════════════
+
 def cmd_run(args):
-    """运行交易引擎"""
+    """运行交易引擎（使用 Regime 策略）"""
     config = load_config(args.config)
     simulate = not args.live
     engine = TradingEngine(config, simulate=simulate)
+
+    # 注入 Regime 策略
+    _init_regime_on_engine(engine)
+
+    # 替换 _process_symbol 为 regime 版本
+    import types
+    engine._process_symbol = types.MethodType(
+        lambda self, sym, prices, nav: _process_symbol_regime(self, sym, prices, nav),
+        engine)
+
     engine.warmup(skip_history=args.skip_data, skip_train=args.skip_train)
 
     if args.once:
@@ -44,6 +247,7 @@ def cmd_run(args):
     else:
         engine.run(interval_seconds=args.interval)
 
+
 def cmd_sync_data(args):
     """仅同步历史数据"""
     config = load_config(args.config)
@@ -51,6 +255,7 @@ def cmd_sync_data(args):
     storage = Storage(config.get_nested("data.database.path", "data/quant.db"))
     downloader = HistoryDownloader(config, client, storage)
     downloader.sync_all(max_workers=3)
+
 
 def cmd_validate(args):
     """数据质量检查"""
@@ -65,12 +270,14 @@ def cmd_validate(args):
             status_icon = "✅" if report.get("status") == "ok" else "⚠️"
             logger.info(f"{status_icon} {symbol}/{tf['interval']}: {report}")
 
+
 def cmd_train(args):
-    """仅训练模型"""
+    """仅训练 ML 模型"""
     config = load_config(args.config)
     storage = Storage(config.get_nested("data.database.path", "data/quant.db"))
     feature_engine = FeatureEngine(
-        windows=config.get_nested("features.lookback_windows", [5, 10, 20, 60, 120, 240, 480]))
+        windows=config.get_nested("features.lookback_windows",
+                                   [5, 10, 20, 60, 120, 240, 480]))
     alpha_model = AlphaModel(config, storage)
 
     for symbol in config.get_symbols():
@@ -80,7 +287,8 @@ def cmd_train(args):
             continue
 
         logger.info(f"训练 {symbol}，{len(df)} 条K线...")
-        features = feature_engine.compute_all(df, include_target=True, target_periods=[1, 4, 24])
+        features = feature_engine.compute_all(
+            df, include_target=True, target_periods=[1, 4, 24])
         features = feature_engine.preprocess(features, method="zscore")
 
         report = alpha_model.train(features, target_col="target_dir_1")
@@ -89,22 +297,19 @@ def cmd_train(args):
             logger.info(f"  {k}: {v:.4f}")
         break
 
+
 def cmd_backtest(args):
     """
-    滚动窗口回测
+    原版 ML 滚动窗口回测（保留兼容）
 
-    修复要点：
-    - 测试窗口需要包含足够的 lookback 数据才能计算特征
-    - 从训练数据末尾取 lookback 条拼接到测试数据前面
-    - 计算完特征后只取测试部分的预测结果
+    如需使用 Regime 策略回测，请用 --backtest-v2
     """
     config = load_config(args.config)
     storage = Storage(config.get_nested("data.database.path", "data/quant.db"))
-    windows = config.get_nested("features.lookback_windows", [5, 10, 20, 60, 120, 240, 480])
+    windows = config.get_nested("features.lookback_windows",
+                                 [5, 10, 20, 60, 120, 240, 480])
     feature_engine = FeatureEngine(windows=windows)
-
-    # 特征计算需要的最小 lookback 条数
-    lookback = max(windows) + 20  # 480 + 20 = 500
+    lookback = max(windows) + 20
 
     for symbol in config.get_symbols():
         df = storage.get_klines(symbol, "1h")
@@ -114,7 +319,6 @@ def cmd_backtest(args):
 
         logger.info(f"回测 {symbol}，共 {len(df)} 条K线")
 
-        # 滚动窗口参数
         train_size = 1500
         test_size = 200
         step = 200
@@ -132,13 +336,10 @@ def cmd_backtest(args):
             test_start = start + train_size
             test_end = test_start + test_size
 
-            # ---- 训练 ----
             train_feat = feature_engine.compute_all(
                 train_df, include_target=True, target_periods=[1])
             if train_feat.empty:
-                logger.debug(f"窗口 {window_count}: 训练特征为空，跳过")
                 continue
-
             train_feat = feature_engine.preprocess(train_feat, method="zscore")
 
             alpha = AlphaModel(config, storage)
@@ -148,51 +349,37 @@ def cmd_backtest(args):
                 logger.debug(f"窗口 {window_count}: 训练失败 ({e})，跳过")
                 continue
 
-            # ---- 测试 ----
-            # 关键修复：取 lookback + test_size 条数据计算特征
             context_start = max(0, test_start - lookback)
             context_df = df.iloc[context_start:test_end].copy()
-
             test_feat = feature_engine.compute_all(context_df)
             if test_feat.empty:
-                logger.debug(f"窗口 {window_count}: 测试特征为空，跳过")
                 continue
-
             test_feat = feature_engine.preprocess(test_feat, method="zscore")
 
-            # 只取测试部分（去掉 lookback 的行）
             n_lookback = test_start - context_start
             if len(test_feat) > n_lookback:
                 test_feat = test_feat.iloc[n_lookback:]
             else:
-                logger.debug(f"窗口 {window_count}: 测试特征不足，跳过")
                 continue
 
             try:
                 preds = alpha.predict(test_feat)
-            except Exception as e:
-                logger.debug(f"窗口 {window_count}: 预测失败 ({e})，跳过")
+            except Exception:
                 continue
 
             if preds.empty:
                 continue
 
-            # ---- 模拟交易 ----
             test_df = df.iloc[test_start:test_end]
 
             for i in range(len(preds)):
                 sig = preds.iloc[i]["signal"]
-
-                if i < len(test_df):
-                    price = float(test_df.iloc[i]["close"])
-                else:
-                    price = float(test_df.iloc[-1]["close"])
+                price = float(test_df.iloc[min(i, len(test_df) - 1)]["close"])
 
                 if sig in ("BUY", "STRONG_BUY") and position == 0:
                     qty = equity[-1] * 0.95 / price
                     position = qty
                     entry_price = price * 1.001
-
                 elif sig in ("SELL", "STRONG_SELL") and position > 0:
                     exit_price = price * 0.999
                     pnl = position * (exit_price - entry_price)
@@ -212,7 +399,6 @@ def cmd_backtest(args):
                         f"训练={len(train_feat)}样本 测试={len(preds)}信号 "
                         f"累计交易={trade_count}")
 
-        # ---- 如果还有持仓，按最后价格平仓 ----
         if position > 0:
             last_price = float(df.iloc[-1]["close"])
             exit_price = last_price * 0.999
@@ -221,15 +407,11 @@ def cmd_backtest(args):
             trades_pnl.append(pnl / (position * entry_price))
             position = 0
 
-        # ---- 报告 ----
         eq = np.array(equity)
         tp = np.array(trades_pnl) if trades_pnl else np.array([0.0])
 
         if len(eq) < 2:
-            logger.warning(f"{symbol}: 没有产生任何交易，无法生成报告")
-            logger.info(f"  可能原因: 数据量不足或特征计算窗口太大")
-            logger.info(f"  数据量={len(df)}，训练窗口={train_size}，"
-                        f"测试窗口={test_size}，lookback={lookback}")
+            logger.warning(f"{symbol}: 没有产生任何交易")
             continue
 
         report = generate_report(eq, tp, frequency="1h")
@@ -237,23 +419,59 @@ def cmd_backtest(args):
         logger.info(f"{symbol} 回测完成: 共 {window_count} 个窗口, {trade_count} 笔交易")
 
 
+def cmd_backtest_v2(args):
+    """
+    政体自适应回测 v2
+
+    使用 FeatureEngine + RegimeAdaptiveStrategy，
+    和 cmd_run 的模拟/实盘交易走完全相同的策略逻辑。
+    """
+    from backtest_runner import BacktestEngineV2, write_snapshot
+
+    config = load_config(args.config)
+    db_path = config.get_nested("data.database.path", "data/quant.db")
+
+    if not Path(db_path).exists():
+        logger.error(f"数据库不存在: {db_path}")
+        logger.error("请先运行: python main.py --sync-data")
+        return
+
+    cfg = RegimeStrategyConfig()
+
+    # 如果命令行指定了参数
+    if hasattr(args, 'bt_risk') and args.bt_risk is not None:
+        cfg.risk_per_trade = args.bt_risk
+        cfg.risk_per_trade_weak = args.bt_risk / 2
+    if hasattr(args, 'bt_trail') and args.bt_trail is not None:
+        cfg.trailing_atr_mult = args.bt_trail
+
+    engine = BacktestEngineV2(
+        db_path=db_path,
+        initial_capital=args.bt_capital,
+        start_date=args.bt_start,
+        end_date=args.bt_end,
+        cfg=cfg,
+        enable_regime=not args.no_regime,
+    )
+
+    report = engine.run()
+    if report:
+        write_snapshot(report, args.bt_snapshot, db_path,
+                       args.bt_start, args.bt_end)
+
+
 def cmd_validate_strategy(args):
     """
-    政体自适应策略验证回测
+    政体自适应策略验证回测（原版保留）
 
-    用最近 2 个月作为测试期，之前全部数据作为 lookback 上下文。
-    同时运行原版 EMA 交叉策略作对照，量化「政体过滤」的改善。
+    用最近 2 个月作为测试期，和原版 EMA 交叉策略做对比。
     """
     from datetime import datetime, timezone
-    from alpha.regime_strategy import (
-        RegimeAdaptiveStrategy, RegimeStrategyConfig, add_regime_column,
-        REGIME_BULL_TREND, REGIME_BULL_WEAK,
-        REGIME_BEAR_TREND, REGIME_BEAR_WEAK,
-    )
 
     config = load_config(args.config)
     storage = Storage(config.get_nested("data.database.path", "data/quant.db"))
-    windows = config.get_nested("features.lookback_windows", [5, 10, 20, 60, 120, 240, 480])
+    windows = config.get_nested("features.lookback_windows",
+                                 [5, 10, 20, 60, 120, 240, 480])
     feature_engine = FeatureEngine(windows=windows)
 
     INITIAL_CAPITAL = 500.0
@@ -268,43 +486,32 @@ def cmd_validate_strategy(args):
 
     strategy = RegimeAdaptiveStrategy()
     cfg = strategy.cfg
-
     symbols = config.get_symbols()
 
     for symbol in symbols:
-        logger.info(f"{'='*60}")
+        logger.info(f"{'=' * 60}")
         logger.info(f"  政体策略验证: {symbol}")
         logger.info(f"  测试期: {TEST_START} ~ {TEST_END} | 本金: {INITIAL_CAPITAL} USDT")
-        logger.info(f"{'='*60}")
+        logger.info(f"{'=' * 60}")
 
-        # ---- 加载全部 4h 数据 ----
         df = storage.get_klines(symbol, INTERVAL)
         if len(df) < 1000:
-            logger.warning(f"{symbol}: 4h 数据不足 ({len(df)} 条)，需要至少 1000 条")
+            logger.warning(f"{symbol}: 4h 数据不足 ({len(df)} 条)")
             continue
 
         for c in ["open", "high", "low", "close", "volume"]:
             df[c] = df[c].astype(float)
 
-        start_ts = pd.Timestamp(df["open_time"].iloc[0], unit="ms", tz="UTC")
-        end_ts   = pd.Timestamp(df["open_time"].iloc[-1], unit="ms", tz="UTC")
-        logger.info(f"数据: {len(df)} 条 4h K 线 ({start_ts.date()} ~ {end_ts.date()})")
-
-        # ---- 计算特征（复用 FeatureEngine） ----
         features = feature_engine.compute_all(df)
         if features.empty:
-            logger.warning(f"{symbol}: 特征计算失败")
             continue
 
-        # 补回 FeatureEngine 没保留的列
         for col in ["open", "high", "low", "open_time"]:
             if col in df.columns:
                 features[col] = df[col].values
 
-        # 添加政体标签
         features = add_regime_column(features)
 
-        # ---- 定位测试期 ----
         test_mask = (features["open_time"] >= test_start_ms) & \
                     (features["open_time"] <= test_end_ms)
         test_indices = features[test_mask].index.tolist()
@@ -316,62 +523,44 @@ def cmd_validate_strategy(args):
         test_start_idx = test_indices[0]
         test_end_idx   = test_indices[-1]
         n_test_bars    = len(test_indices)
-
         test_start_price = features.loc[test_start_idx, "close"]
         test_end_price   = features.loc[test_end_idx, "close"]
-        buy_hold_ret     = (test_end_price / test_start_price - 1)
+        buy_hold_ret     = test_end_price / test_start_price - 1
 
         logger.info(f"测试期: {n_test_bars} bars | "
-                    f"起始价 {test_start_price:.2f} → 结束价 {test_end_price:.2f} | "
                     f"Buy&Hold {buy_hold_ret:+.2%}")
 
-        # 政体分布
-        regime_dist = features.loc[test_start_idx:test_end_idx, "regime"].value_counts()
-        for r, cnt in regime_dist.items():
-            logger.info(f"  政体 {r:15s}: {cnt:4d} bars ({cnt/n_test_bars*100:.1f}%)")
-
-        # ============================================================
-        # 新策略回测
-        # ============================================================
+        # ── 新策略回测 ──
         cash = INITIAL_CAPITAL
         position = None
         trades = []
         equity_list = [INITIAL_CAPITAL]
-        peak_equity = INITIAL_CAPITAL
 
         for idx in test_indices:
             if idx == 0:
                 continue
-
             row      = features.iloc[idx]
             prev_row = features.iloc[idx - 1]
             close    = row["close"]
             high     = row.get("high", close)
-            low      = row.get("low", close)
             ts       = pd.Timestamp(row["open_time"], unit="ms", tz="UTC") \
                          .strftime("%Y-%m-%d %H:%M")
 
             equity = cash + (position["qty"] * close if position else 0)
-            peak_equity = max(peak_equity, equity)
             equity_list.append(equity)
 
-            # ---- 持仓中 ----
             if position is not None:
                 position["highest_since_entry"] = max(
                     position["highest_since_entry"], high)
                 bar_count = idx - position["entry_bar"]
 
-                # 减仓
                 if strategy.check_partial_exit(row, position):
                     sell_qty = position["qty"] * cfg.partial_exit_pct
                     sell_price = close * (1 - cfg.slippage_pct)
                     cash += sell_qty * sell_price * (1 - cfg.commission_pct)
                     position["qty"] -= sell_qty
                     position["partial_done"] = True
-                    logger.info(f"  📉 {ts} | 减仓 {cfg.partial_exit_pct:.0%} "
-                                f"@ {sell_price:.2f}")
 
-                # 出场
                 should_exit, reason = strategy.check_exit(row, position, bar_count)
                 if should_exit:
                     exit_price = close * (1 - cfg.slippage_pct)
@@ -380,36 +569,22 @@ def cmd_validate_strategy(args):
                           (1 + cfg.commission_pct)
                     pnl_pct = exit_price / position["entry_price"] - 1
                     cash += proceeds
-
-                    icon = "🟢" if pnl > 0 else "🔴"
-                    logger.info(
-                        f"  {icon} {ts} | 平仓 @ {exit_price:.2f} | "
-                        f"入={position['entry_price']:.2f} | "
-                        f"PnL={pnl:+.2f} ({pnl_pct:+.1%}) | "
-                        f"{bar_count}bars | {reason}")
-
                     trades.append({
                         "symbol": symbol, "entry_time": position["entry_time"],
-                        "exit_time": ts,
-                        "entry_price": position["entry_price"],
-                        "exit_price": exit_price,
-                        "pnl": round(pnl, 2), "pnl_pct": pnl_pct,
-                        "holding_bars": bar_count, "reason": reason,
-                        "regime": position["regime"],
+                        "exit_time": ts, "entry_price": position["entry_price"],
+                        "exit_price": exit_price, "pnl": round(pnl, 2),
+                        "pnl_pct": pnl_pct, "holding_bars": bar_count,
+                        "reason": reason, "regime": position["regime"],
                     })
                     position = None
 
-            # ---- 入场 ----
             if position is None and strategy.should_enter(row, prev_row):
                 regime = row.get("regime", "RANGE")
                 natr   = row.get("natr_20", 0)
-
                 if pd.isna(natr) or natr <= 0:
                     continue
-
                 entry_price = close * (1 + cfg.slippage_pct)
                 qty, stop_loss = strategy.calc_position(cash, entry_price, natr, regime)
-
                 if qty > 0:
                     cost = qty * entry_price * (1 + cfg.commission_pct)
                     if cost <= cash:
@@ -417,19 +592,12 @@ def cmd_validate_strategy(args):
                         atr_abs = natr * entry_price
                         position = {
                             "qty": qty, "original_qty": qty,
-                            "entry_price": entry_price,
-                            "stop_loss": stop_loss,
-                            "highest_since_entry": high,
-                            "atr_at_entry": atr_abs,
+                            "entry_price": entry_price, "stop_loss": stop_loss,
+                            "highest_since_entry": high, "atr_at_entry": atr_abs,
                             "entry_bar": idx, "entry_time": ts,
                             "regime": regime, "partial_done": False,
                         }
-                        logger.info(
-                            f"  🔵 {ts} | 开仓 @ {entry_price:.2f} | "
-                            f"qty={qty:.6f} | {qty*entry_price:.2f} USDT | "
-                            f"止损={stop_loss:.2f} | {regime}")
 
-        # 收尾
         if position is not None:
             ep = features.loc[test_end_idx, "close"] * (1 - cfg.slippage_pct)
             pnl = position["qty"] * (ep - position["entry_price"]) * (1 - cfg.commission_pct)
@@ -443,9 +611,7 @@ def cmd_validate_strategy(args):
                 "reason": "backtest_end", "regime": position["regime"],
             })
 
-        # ============================================================
-        # 对照组：原版 EMA 交叉
-        # ============================================================
+        # ── 对照组：原版 EMA 交叉 ──
         orig_cash = INITIAL_CAPITAL
         orig_pos = None
         orig_trades_pnl = []
@@ -459,12 +625,10 @@ def cmd_validate_strategy(args):
             high = row.get("high", close)
             natr = row.get("natr_20", 0)
             atr = natr * close if natr > 0 else 0
-
             ef = row.get("ema_20", close)
             es = row.get("ema_50", close)
             pef = prev_row.get("ema_20", close)
             pes = prev_row.get("ema_50", close)
-
             cn = 1 if ef > es else -1
             cp = 1 if pef > pes else -1
 
@@ -472,8 +636,7 @@ def cmd_validate_strategy(args):
                 orig_pos["h"] = max(orig_pos["h"], high)
                 ts_val = orig_pos["h"] - 2.5 * atr if atr > 0 else orig_pos["sl"]
                 ts_val = max(ts_val, orig_pos["sl"])
-                do_exit = close <= ts_val or (cn == -1 and cp == 1)
-                if do_exit:
+                if close <= ts_val or (cn == -1 and cp == 1):
                     ep = close * 0.999
                     orig_cash += orig_pos["q"] * ep
                     orig_trades_pnl.append(orig_pos["q"] * (ep - orig_pos["e"]))
@@ -495,23 +658,18 @@ def cmd_validate_strategy(args):
 
         orig_return = (orig_cash - INITIAL_CAPITAL) / INITIAL_CAPITAL
 
-        # ============================================================
-        # 报告
-        # ============================================================
+        # ── 报告 ──
         final_equity = cash
         new_return = (final_equity - INITIAL_CAPITAL) / INITIAL_CAPITAL
-
         eq = np.array(equity_list)
         peak = np.maximum.accumulate(eq)
         max_dd = float(((peak - eq) / peak.clip(min=1e-10)).max())
-
         pnls = [t["pnl"] for t in trades]
         wins = [p for p in pnls if p > 0]
         losses = [p for p in pnls if p < 0]
         win_rate = len(wins) / len(pnls) if pnls else 0
         pf = sum(wins) / abs(sum(losses)) if losses and sum(losses) != 0 else (
             float("inf") if wins else 0)
-        in_market = sum(t["holding_bars"] for t in trades)
 
         print()
         print("=" * 65)
@@ -534,8 +692,6 @@ def cmd_validate_strategy(args):
         print(f"     交易数 (新/原):   {len(trades):>4d} / {len(orig_trades_pnl)}")
         print(f"     胜率:             {win_rate:>10.1%}")
         print(f"     盈亏比:           {pf:>10.3f}")
-        print(f"     在场时间:         {in_market:>4d}/{n_test_bars} bars "
-              f"({in_market/n_test_bars*100:.0f}%)")
         if pnls:
             print(f"     最大盈利:         {max(pnls):>+10.2f}")
             print(f"     最大亏损:         {min(pnls):>+10.2f}")
@@ -552,9 +708,6 @@ def cmd_validate_strategy(args):
 
         print("=" * 65)
 
-        if len(trades) == 0:
-            logger.info("测试期无交易 — 政体过滤器阻止了熊市做多，不亏就是赢")
-
         monthly = {}
         for t in trades:
             m = t["exit_time"][:7]
@@ -567,8 +720,12 @@ def cmd_validate_strategy(args):
         print()
 
 
+# ═══════════════════════════════════════════════════════════════
+# 入口
+# ═══════════════════════════════════════════════════════════════
+
 def main():
-    parser = argparse.ArgumentParser(description="量化交易系统 v2.0")
+    parser = argparse.ArgumentParser(description="量化交易系统 v2.1")
     parser.add_argument("--config", type=str, default=None, help="配置文件路径")
     parser.add_argument("--live", action="store_true", help="实盘模式")
     parser.add_argument("--once", action="store_true", help="只运行一轮")
@@ -578,13 +735,33 @@ def main():
     parser.add_argument("--sync-data", action="store_true", help="仅同步数据")
     parser.add_argument("--validate", action="store_true", help="数据质量检查")
     parser.add_argument("--train", action="store_true", help="仅训练模型")
-    parser.add_argument("--backtest", action="store_true", help="回测")
+    parser.add_argument("--backtest", action="store_true", help="原版 ML 回测")
+    parser.add_argument("--backtest-v2", action="store_true",
+                        help="政体自适应回测 v2（推荐）")
     parser.add_argument("--validate-strategy", action="store_true",
                         help="政体策略验证回测 (2个月)")
+
+    # backtest-v2 专用参数
+    parser.add_argument("--no-regime", action="store_true",
+                        help="关闭 regime 过滤（对照组）")
+    parser.add_argument("--bt-capital", type=float, default=10000.0,
+                        help="回测初始资金")
+    parser.add_argument("--bt-start", type=str, default=None,
+                        help="回测起始日期 YYYY-MM-DD")
+    parser.add_argument("--bt-end", type=str, default=None,
+                        help="回测结束日期 YYYY-MM-DD")
+    parser.add_argument("--bt-snapshot", type=str,
+                        default="backtest_snapshot.txt",
+                        help="回测快照输出路径")
+    parser.add_argument("--bt-risk", type=float, default=None,
+                        help="单笔风险比例")
+    parser.add_argument("--bt-trail", type=float, default=None,
+                        help="移动止损 ATR 倍数")
+
     args = parser.parse_args()
 
     logger.info("=" * 60)
-    logger.info("  Crypto Quant Engine v2.0")
+    logger.info("  Crypto Quant Engine v2.1")
     logger.info("=" * 60)
 
     if args.sync_data:
@@ -595,10 +772,13 @@ def main():
         cmd_train(args)
     elif args.backtest:
         cmd_backtest(args)
+    elif args.backtest_v2:
+        cmd_backtest_v2(args)
     elif args.validate_strategy:
         cmd_validate_strategy(args)
     else:
         cmd_run(args)
+
 
 if __name__ == "__main__":
     main()
