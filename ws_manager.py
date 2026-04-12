@@ -4,6 +4,7 @@ Binance WebSocket 实时数据管理器
 - 20 档订单簿深度流
 - 自动重连 + 指数退避
 - 心跳 / pong 处理
+- HTTP/SOCKS5 代理支持
 - 独立线程运行，不阻塞主引擎
 """
 import json
@@ -12,6 +13,7 @@ import asyncio
 import threading
 from typing import Optional, Callable
 from datetime import datetime
+from urllib.parse import urlparse
 
 import pandas as pd
 
@@ -50,6 +52,10 @@ class BinanceWSManager:
         exc = config.exchange
         self._testnet = exc.testnet
         self._ws_base_url = exc.ws_url_test if exc.testnet else exc.ws_url_live
+
+        # 代理配置
+        proxy_url = exc._data.get("proxy", "") if hasattr(exc, "_data") else ""
+        self._proxy_url = proxy_url
 
         # 交易对和时间框架
         self._symbols = [s.lower() for s in config.get_symbols()]
@@ -91,10 +97,11 @@ class BinanceWSManager:
         self._kline_callbacks: list[Callable] = []
         self._orderbook_callbacks: list[Callable] = []
 
+        proxy_info = f" | 代理={proxy_url}" if proxy_url else ""
         logger.info(
             f"WS 管理器初始化 | testnet={self._testnet} | "
             f"标的={self._symbols_upper} | K线={self._kline_intervals} | "
-            f"订单簿={'启用' if self._orderbook_enabled else '关闭'}")
+            f"订单簿={'启用' if self._orderbook_enabled else '关闭'}{proxy_info}")
 
     # ==============================================================
     # 公共 API
@@ -208,18 +215,36 @@ class BinanceWSManager:
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, self._reconnect_delay_max)
 
+    def _build_ws_connect_kwargs(self) -> dict:
+        """构建 websockets.connect 的关键字参数，含代理"""
+        kwargs = {
+            "ping_interval": self._ping_interval,
+            "ping_timeout": self._ping_timeout,
+            "close_timeout": 5,
+            "max_size": 10 * 1024 * 1024,  # 10MB
+        }
+
+        # 代理支持：websockets >= 12.0 通过 additional_headers 不直接支持代理
+        # 需要通过 HTTPS_PROXY / HTTP_PROXY 环境变量或 python-socks
+        # 这里使用 websockets 自带的 open_timeout 并依赖系统代理环境变量
+        if self._proxy_url:
+            import os
+            # 设置当前线程的环境变量让 websockets 走代理
+            os.environ["HTTP_PROXY"] = self._proxy_url
+            os.environ["HTTPS_PROXY"] = self._proxy_url
+            os.environ["http_proxy"] = self._proxy_url
+            os.environ["https_proxy"] = self._proxy_url
+            logger.debug(f"WS 代理已设置: {self._proxy_url}")
+
+        return kwargs
+
     async def _connect_and_listen(self):
         """建立连接并持续监听"""
         url = self._build_stream_url()
-        logger.info(f"连接 WebSocket: {url[:80]}...")
+        connect_kwargs = self._build_ws_connect_kwargs()
+        logger.info(f"连接 WebSocket: {url[:100]}...")
 
-        async with websockets.connect(
-            url,
-            ping_interval=self._ping_interval,
-            ping_timeout=self._ping_timeout,
-            close_timeout=5,
-            max_size=10 * 1024 * 1024,  # 10MB，订单簿数据可能较大
-        ) as ws:
+        async with websockets.connect(url, **connect_kwargs) as ws:
             self._ws = ws
             self._connected = True
             logger.info(f"WS 已连接 | 订阅 {len(self._symbols)} 个标的")
@@ -373,7 +398,7 @@ class BinanceWSManager:
             "imbalance": imbalance,
         }
 
-        # 写入数据库（控制频率：每秒最多写一次）
+        # 写入数据库
         try:
             self.storage.save_orderbook_snapshot(ob_snapshot)
         except Exception as e:

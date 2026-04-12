@@ -308,6 +308,15 @@ class Storage:
             row = cur.fetchone()
         return row[0] if row and row[0] else None
 
+    def get_earliest_kline_time(self, symbol: str, interval: str) -> Optional[int]:
+        """获取最早一条K线的 open_time"""
+        with self._conn() as conn:
+            cur = conn.execute(
+                "SELECT MIN(open_time) FROM klines WHERE symbol=? AND interval=?",
+                (symbol, interval))
+            row = cur.fetchone()
+        return row[0] if row and row[0] else None
+
     def get_kline_count(self, symbol: str, interval: str) -> int:
         with self._conn() as conn:
             cur = conn.execute(

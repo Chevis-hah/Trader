@@ -16,7 +16,7 @@ exchange:
   name: "binance"
   api_key: "${BINANCE_API_KEY}"
   api_secret: "${BINANCE_API_SECRET}"
-  testnet: true
+  testnet: false
   base_url_live: "https://api.binance.com"
   base_url_test: "https://testnet.binance.vision"
   ws_url_live: "wss://stream.binance.com:9443/ws"

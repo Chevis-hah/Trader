@@ -16,11 +16,26 @@ exchange:
   name: "binance"
   api_key: "${BINANCE_API_KEY}"
   api_secret: "${BINANCE_API_SECRET}"
-  testnet: true
+  testnet: false                    # false = 连接真实 API 拉取真实数据
   base_url_live: "https://api.binance.com"
   base_url_test: "https://testnet.binance.vision"
   ws_url_live: "wss://stream.binance.com:9443/ws"
   ws_url_test: "wss://testnet.binance.vision/ws"
+
+  # ---- 网络代理（中国大陆必须配置）----
+  # 填写你本地代理软件（Clash/V2Ray/SSR 等）的监听地址
+  # Clash 默认: http://127.0.0.1:7890
+  # V2Ray 默认: socks5://127.0.0.1:10808
+  # 不需要代理就留空字符串 ""
+  proxy: "http://127.0.0.1:7890"
+
+  # 备用 API 域名（主域名不通时自动切换）
+  base_url_alternatives:
+    - "https://api1.binance.com"
+    - "https://api2.binance.com"
+    - "https://api3.binance.com"
+    - "https://api4.binance.com"
+
   # REST API 限流
   rate_limit:
     requests_per_minute: 1200
@@ -33,8 +48,8 @@ exchange:
     retry_on_status: [429, 500, 502, 503]
   # 超时
   timeout:
-    connect: 5
-    read: 15
+    connect: 10
+    read: 30
   # WebSocket 实时数据流
   websocket:
     ping_interval_seconds: 20       # 心跳间隔

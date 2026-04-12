@@ -4,6 +4,8 @@ Binance REST API 客户端
 - 请求速率限制
 - 完整错误处理
 - 请求延迟统计
+- HTTP/SOCKS5 代理支持（中国大陆必需）
+- 备用域名自动切换
 """
 import time
 import hmac
@@ -71,10 +73,14 @@ class BinanceClient:
         self._retry_on = set(retry_cfg.get("retry_on_status", [429, 500, 502, 503]))
 
         timeout_cfg = exc.timeout.to_dict() if hasattr(exc.timeout, "to_dict") else exc.timeout._data
-        self._timeout = (timeout_cfg.get("connect", 5), timeout_cfg.get("read", 15))
+        self._timeout = (timeout_cfg.get("connect", 10), timeout_cfg.get("read", 30))
 
         rl_cfg = exc.rate_limit.to_dict() if hasattr(exc.rate_limit, "to_dict") else exc.rate_limit._data
         self._limiter = RateLimiter(rl_cfg.get("requests_per_minute", 1200))
+
+        # ---- 代理配置 ----
+        proxy_url = exc._data.get("proxy", "") if hasattr(exc, "_data") else ""
+        self._proxy = proxy_url
 
         self._session = requests.Session()
         self._session.headers.update({
@@ -82,12 +88,68 @@ class BinanceClient:
             "Content-Type": "application/x-www-form-urlencoded",
         })
 
+        if proxy_url:
+            self._session.proxies = {
+                "http": proxy_url,
+                "https": proxy_url,
+            }
+            logger.info(f"已配置代理: {proxy_url}")
+
+        # ---- 备用域名（主域名被墙时自动切换） ----
+        if not exc.testnet:
+            alt_urls_raw = exc._data.get("base_url_alternatives", []) if hasattr(exc, "_data") else []
+            self._base_urls = [self.base_url] + list(alt_urls_raw)
+        else:
+            self._base_urls = [self.base_url]
+
         # 统计
         self._request_count = 0
         self._error_count = 0
         self._total_latency = 0.0
 
-        logger.info(f"Binance 客户端初始化 | URL={self.base_url} | 重试={self._max_retries}")
+        proxy_info = f" | 代理={proxy_url}" if proxy_url else ""
+        logger.info(f"Binance 客户端初始化 | URL={self.base_url} | 重试={self._max_retries}{proxy_info}")
+
+        # 启动时连通性测试 + 自动切换可用域名
+        self._verify_connectivity()
+
+    # ----------------------------------------------------------
+    # 连通性
+    # ----------------------------------------------------------
+    def _verify_connectivity(self):
+        """启动时测试连通性，主域名不通则自动切换备用域名"""
+        for url in self._base_urls:
+            try:
+                resp = self._session.get(f"{url}/api/v3/ping", timeout=(5, 5))
+                if resp.status_code == 200:
+                    if url != self.base_url:
+                        logger.info(f"主域名不可用，已切换到: {url}")
+                        self.base_url = url
+                    logger.info(f"✅ 连通性测试通过: {url}")
+                    return
+            except Exception as e:
+                logger.warning(f"❌ 连通性测试失败: {url} ({type(e).__name__})")
+                continue
+
+        logger.error(
+            "\n" + "=" * 60 + "\n"
+            "  所有 Binance API 域名均不可达！\n"
+            "  请检查以下配置（编辑 config/settings.yaml）：\n\n"
+            "  方案 1 — 配置代理（推荐）：\n"
+            "    exchange:\n"
+            "      proxy: \"http://127.0.0.1:7890\"  # Clash 默认端口\n"
+            "      # 或: proxy: \"socks5://127.0.0.1:1080\"\n\n"
+            "  方案 2 — 使用备用域名：\n"
+            "    exchange:\n"
+            "      base_url_alternatives:\n"
+            "        - \"https://api1.binance.com\"\n"
+            "        - \"https://api2.binance.com\"\n"
+            "        - \"https://api3.binance.com\"\n"
+            "        - \"https://api4.binance.com\"\n\n"
+            "  方案 3 — 使用 data.binance.vision（仅公共数据）：\n"
+            "    exchange:\n"
+            "      base_url_live: \"https://data-api.binance.vision\"\n"
+            + "=" * 60)
 
     # ----------------------------------------------------------
     # 核心请求方法

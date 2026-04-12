@@ -75,36 +75,27 @@ class HistoryDownloader:
         logger.info(f"数据同步完成 | 总写入={total} 条 | 失败={failed} 个")
         return results
 
-    def _sync_one(self, symbol: str, interval: str, retention_days: int) -> int:
-        """同步单个交易对的单个时间框架"""
-        interval_ms = INTERVAL_MS.get(interval, 3600000)
-        now_ms = int(time.time() * 1000)
-        earliest_ms = now_ms - retention_days * 86400 * 1000
-
-        # 检查数据库中已有数据的最新时间
-        latest_in_db = self.storage.get_latest_kline_time(symbol, interval)
-
-        if latest_in_db and latest_in_db > earliest_ms:
-            # 增量更新：从上次最后一条的下一根K线开始
-            start_ms = latest_in_db + interval_ms
-            existing = self.storage.get_kline_count(symbol, interval)
-            logger.info(
-                f"增量更新 {symbol}/{interval} | 已有 {existing} 条 | "
-                f"从 {datetime.utcfromtimestamp(start_ms/1000).strftime('%Y-%m-%d %H:%M')} 开始")
-        else:
-            # 全量拉取
-            start_ms = earliest_ms
-            logger.info(
-                f"全量下载 {symbol}/{interval} | "
-                f"从 {datetime.utcfromtimestamp(start_ms/1000).strftime('%Y-%m-%d')} 开始 | "
-                f"预估 {retention_days * 86400000 // interval_ms} 条")
-
+    def _download_range(
+        self,
+        symbol: str,
+        interval: str,
+        start_ms: int,
+        until_ms: int,
+        interval_ms: int,
+        cap_open_time_lt: Optional[int] = None,
+        log_prefix: str = "",
+    ) -> int:
+        """
+        从 start_ms 分页拉取到游标 >= until_ms。
+        cap_open_time_lt：仅写入 open_time 小于该值的 K 线（向前补全时避免与已有首根重叠）。
+        """
         total_written = 0
-        batch_size = 1000  # Binance 单次最多 1000 条
+        batch_size = 1000
         current_start = start_ms
         consecutive_empty = 0
+        span = max(until_ms - start_ms, 1)
 
-        while current_start < now_ms:
+        while current_start < until_ms:
             try:
                 df = self.client.get_klines(
                     symbol=symbol, interval=interval,
@@ -119,33 +110,72 @@ class HistoryDownloader:
 
                 consecutive_empty = 0
 
-                # 写入数据库
+                if cap_open_time_lt is not None:
+                    df = df[df["open_time"] < cap_open_time_lt]
+                    if df.empty:
+                        break
+
                 written = self.storage.upsert_klines(symbol, interval, df)
                 total_written += written
 
-                # 移动游标到最后一条之后
                 last_time = int(df["open_time"].iloc[-1])
                 current_start = last_time + interval_ms
 
-                # 如果返回数据少于请求数，说明已到达最新
                 if len(df) < batch_size:
                     break
 
-                # 进度日志（每 10000 条输出一次）
                 if total_written % 10000 < batch_size:
-                    pct = (current_start - start_ms) / max(now_ms - start_ms, 1) * 100
+                    pct = min(100.0, (current_start - start_ms) / span * 100)
                     logger.info(
-                        f"  {symbol}/{interval} 进度 {pct:.1f}% | "
+                        f"  {symbol}/{interval}{log_prefix} 进度 {pct:.1f}% | "
                         f"已下载 {total_written} 条 | "
                         f"当前到 {datetime.utcfromtimestamp(last_time/1000).strftime('%Y-%m-%d %H:%M')}")
 
-                # 避免触发限流
                 time.sleep(0.1)
 
             except Exception as e:
                 logger.error(f"下载 {symbol}/{interval} 出错 @ {current_start}: {e}")
                 time.sleep(1)
                 current_start += interval_ms * batch_size
+
+        return total_written
+
+    def _sync_one(self, symbol: str, interval: str, retention_days: int) -> int:
+        """同步单个交易对的单个时间框架"""
+        interval_ms = INTERVAL_MS.get(interval, 3600000)
+        now_ms = int(time.time() * 1000)
+        earliest_ms = now_ms - retention_days * 86400 * 1000
+
+        latest_in_db = self.storage.get_latest_kline_time(symbol, interval)
+        earliest_in_db = self.storage.get_earliest_kline_time(symbol, interval)
+        total_written = 0
+
+        # 扩大保留窗口后：若库里最早一根仍晚于目标起点，则向前补全
+        if earliest_in_db is not None and earliest_in_db > earliest_ms:
+            est = retention_days * 86400000 // interval_ms
+            logger.info(
+                f"向前补全 {symbol}/{interval} | 已有首根 "
+                f"{datetime.utcfromtimestamp(earliest_in_db/1000).strftime('%Y-%m-%d %H:%M')} | "
+                f"补至 {datetime.utcfromtimestamp(earliest_ms/1000).strftime('%Y-%m-%d')} | 预估约 {est} 条")
+            total_written += self._download_range(
+                symbol, interval, earliest_ms, earliest_in_db, interval_ms,
+                cap_open_time_lt=earliest_in_db, log_prefix=" [向前]")
+
+        if latest_in_db and latest_in_db > earliest_ms:
+            start_ms = latest_in_db + interval_ms
+            existing = self.storage.get_kline_count(symbol, interval)
+            logger.info(
+                f"增量更新 {symbol}/{interval} | 已有 {existing} 条 | "
+                f"从 {datetime.utcfromtimestamp(start_ms/1000).strftime('%Y-%m-%d %H:%M')} 开始")
+        else:
+            start_ms = earliest_ms
+            logger.info(
+                f"全量下载 {symbol}/{interval} | "
+                f"从 {datetime.utcfromtimestamp(start_ms/1000).strftime('%Y-%m-%d')} 开始 | "
+                f"预估 {retention_days * 86400000 // interval_ms} 条")
+
+        total_written += self._download_range(
+            symbol, interval, start_ms, now_ms, interval_ms, log_prefix="")
 
         return total_written
 
