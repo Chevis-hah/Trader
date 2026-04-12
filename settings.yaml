@@ -78,25 +78,26 @@ data:
     busy_timeout_ms: 5000
   
   history:
-    lookback_days: 730
+    lookback_days: 2000
+    # 与各 timeframe retention 对齐；自 2021-01-01 起约需 1927 天（至 2026-04），2000 留余量
     timeframes:
       - interval: "1m"
-        retention_days: 90
+        retention_days: 2000
         batch_size: 1000
       - interval: "5m"
-        retention_days: 365
+        retention_days: 2000
         batch_size: 1000
       - interval: "15m"
-        retention_days: 730
+        retention_days: 2000
         batch_size: 1000
       - interval: "1h"
-        retention_days: 730
+        retention_days: 2000
         batch_size: 1000
       - interval: "4h"
-        retention_days: 730
+        retention_days: 2000
         batch_size: 1000
       - interval: "1d"
-        retention_days: 1825
+        retention_days: 2000
         batch_size: 1000
     update_intervals:
       "1m": 60

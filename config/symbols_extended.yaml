@@ -1,0 +1,63 @@
+# ============================================================
+# P5: 扩展标的配置
+#
+# 将此内容合并到 config/settings.yaml 的 universe.symbols 部分
+# 新增 SOL, BNB, AVAX, LINK 四个标的
+# ============================================================
+
+# 替换原有的 universe 部分:
+universe:
+  quote_currency: "USDT"
+  symbols:
+    # ---- 原有标的 ----
+    - symbol: "BTCUSDT"
+      min_qty: 0.00001
+      qty_precision: 5
+      price_precision: 2
+      min_notional: 10.0
+
+    - symbol: "ETHUSDT"
+      min_qty: 0.0001
+      qty_precision: 4
+      price_precision: 2
+      min_notional: 10.0
+
+    # ---- P5: 新增标的 ----
+    - symbol: "SOLUSDT"
+      min_qty: 0.01
+      qty_precision: 2
+      price_precision: 2
+      min_notional: 10.0
+
+    - symbol: "BNBUSDT"
+      min_qty: 0.001
+      qty_precision: 3
+      price_precision: 2
+      min_notional: 10.0
+
+    # 可选: 二线主流
+    # - symbol: "AVAXUSDT"
+    #   min_qty: 0.01
+    #   qty_precision: 2
+    #   price_precision: 2
+    #   min_notional: 10.0
+    #
+    # - symbol: "LINKUSDT"
+    #   min_qty: 0.01
+    #   qty_precision: 2
+    #   price_precision: 2
+    #   min_notional: 10.0
+
+# ============================================================
+# 同时需要更新以下模块中的 SYMBOLS 常量:
+#
+# 1. backtest_arena.py 顶部:
+#    SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
+#
+# 2. backtest_runner.py 中 BacktestEngine.__init__:
+#    从 config 中读取 symbols 而非硬编码
+#
+# 3. 运行数据同步:
+#    python main.py --sync-data
+#    (会自动拉取新标的的历史数据)
+# ============================================================

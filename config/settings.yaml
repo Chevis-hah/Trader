@@ -87,27 +87,27 @@ data:
   
   # 历史数据 - 拉取全量
   history:
-    # 回溯多少天的数据（按需调整，建议 >= 365 * 2）
-    lookback_days: 730
-    # 多时间框架
+    # 与各 timeframe 的 retention_days 对齐；下载逻辑以 timeframes[].retention_days 为准
+    lookback_days: 2000
+    # 多时间框架（统一自 2021-01-01 起：约 1927 天至 2026-04-12，2000 天留余量）
     timeframes:
       - interval: "1m"
-        retention_days: 90       # 1分钟线保留90天
+        retention_days: 2000
         batch_size: 1000
       - interval: "5m"
-        retention_days: 365
+        retention_days: 2000
         batch_size: 1000
       - interval: "15m"
-        retention_days: 730
+        retention_days: 2000
         batch_size: 1000
       - interval: "1h"
-        retention_days: 730
+        retention_days: 2000
         batch_size: 1000
       - interval: "4h"
-        retention_days: 730
+        retention_days: 2000
         batch_size: 1000
       - interval: "1d"
-        retention_days: 1825     # 日线保留5年
+        retention_days: 2000
         batch_size: 1000
     # 增量更新间隔（秒）
     update_intervals:

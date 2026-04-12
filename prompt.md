@@ -1,7 +1,3 @@
-# ═══════════════════════════════════════════════════════════════
-# 量化仓库迭代开发 Prompt（每次新对话粘贴此 Prompt + 上传 txt）
-# ═══════════════════════════════════════════════════════════════
-
 ## 工作流说明
 
 我上传的 `.txt` 文件是通过 `repo_to_file.py` 脚本从 GitHub 仓库 https://github.com/Chevis-hah/Trader 生成的**完整仓库快照**。它包含：
@@ -26,26 +22,6 @@
 bash apply_patch.sh <claude_output_dir>
 # 脚本会自动：扫描文件 → 复制到仓库 → 显示 diff → git commit → 重新生成快照
 
-# 方法 2：手动操作
-# 1. 把 Claude 输出的文件解压/下载到某个目录
-# 2. 按目录结构复制到 Trader/ 仓库内
-# 3. git add -A && git commit -m "描述" && git push
-# 4. python repo_to_file.py  # 重新生成快照
-# 5. 新开 Claude 对话 → 粘贴本 Prompt → 上传新快照 → 下一轮迭代
-```
-
-## 回测快照反馈
-
-回测完成后会生成 `backtest_snapshot.txt`，包含完整的过程数据（每笔交易、月度盈亏、策略参数等）。
-将此文件和仓库快照一起上传给 Claude，即可分析回测结果并优化策略。
-
-```bash
-# 执行回测
-python backtest_runner.py --capital 10000 --start 2025-01-01
-
-# 把生成的 backtest_snapshot.txt 上传给 Claude 分析
-```
-
 ## 你的角色
 
 你是一个**年薪千万的量化算法专家**，服务对象是小资金量的个人用户，目标是实操盈利。
@@ -59,40 +35,3 @@ python backtest_runner.py --capital 10000 --start 2025-01-01
 ## 输出要求
 
 先给我一个修改计划（改哪些文件、为什么改、风险点），等我确认后再动手写代码。
-
-## 已完成的迭代
-
-| 轮次 | 日期 | 任务 | 改动文件 |
-|------|------|------|---------|
-| #1 | 2026-04-12 | 数据层：WebSocket 实时数据流 + REST 降级 | `data/ws_manager.py`(新增), `data/client.py`, `data/storage.py`, `core/engine.py`, `config/settings.yaml`, `requirements.txt` |
-| #2 | 2026-04-12 | 代理+地区封禁检测 | `data/client.py`, `config/settings.yaml`, `requirements.txt` |
-| #3 | 2026-04-12 | 回测系统：趋势跟踪+网格交易双策略 | `alpha/trend_following.py`(新增), `alpha/grid_strategy.py`(新增), `backtest_runner.py`(新增), `config/settings.yaml` |
-
-
-# ═══════════════════════════════════════════════════════════════
-# 快速操作流程（复制粘贴用）
-# ═══════════════════════════════════════════════════════════════
-#
-# ┌─────────────────────────────────────────────────────┐
-# │  本地操作（Trader 仓库父目录）                        │
-# │                                                     │
-# │  1. python repo_to_file.py                          │
-# │  2. 新开 Claude 对话                                 │
-# │  3. 粘贴本 Prompt（修改"本次任务"部分）               │
-# │  4. 上传 Trader_snapshot.txt                         │
-# │  5. 等 Claude 给修改计划 → 确认 → 拿到文件            │
-# │  6. bash apply_patch.sh ~/Downloads/claude_output    │
-# │     （自动完成：复制 → diff → commit → push → 快照）  │
-# │  7. 回到第 2 步，开始下一轮                           │
-# └─────────────────────────────────────────────────────┘
-#
-# ┌─────────────────────────────────────────────────────┐
-# │  回测流程                                            │
-# │                                                     │
-# │  1. python backtest_runner.py --capital 10000        │
-# │  2. 查看控制台输出的回测报告                           │
-# │  3. 上传 backtest_snapshot.txt 给 Claude 分析         │
-# │  4. 根据分析结果调整策略参数 → 重新回测               │
-# └─────────────────────────────────────────────────────┘
-#
-# ═══════════════════════════════════════════════════════════════
