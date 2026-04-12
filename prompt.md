@@ -14,7 +14,8 @@
 ## 交付方式
 
 - 你修改完的每个文件，请**完整输出该文件的全部代码**（不要只输出 diff 或片段）
-- 文件用 `create_file` 工具写到 `/mnt/user-data/outputs/` 目录并 `present_files` 给我
+- 文件用 `create_file` 工具写到 `/mnt/user-data/outputs/` 目录并 `present_files` 
+- 输出的文件不要有绝对路径，如`/mnt/user-data/outputs/`，只希望输出相对路径的文件，如`data/client.py` 
 - 输出的文件保持仓库目录结构（如 `data/client.py` → 输出到 `data/client.py`）
 - 如果有新增文件，同样按目录结构输出
 
