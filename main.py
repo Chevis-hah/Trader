@@ -10,9 +10,9 @@ v2.1 变更：
 用法:
     python main.py                          # 模拟交易（Regime 策略）
     python main.py --live                   # 实盘交易
-    python main.py --backtest-v2            # 政体自适应回测
-    python main.py --backtest-v2 --no-regime # 对照组（关闭 regime）
-    python main.py --backtest               # 原版 ML 滚动窗口回测
+    python main.py --backtest-v2            # 政体自适应回测（默认快照 backtest_v2_regime_snapshot.txt）
+    python main.py --backtest-v2 --no-regime # 对照组（默认 backtest_v2_no_regime_snapshot.txt）
+    python main.py --backtest               # 原版 ML（默认 backtest_v1_ml_snapshot.txt）
     python main.py --validate-strategy      # 政体策略 2 月验证回测
     python main.py --train                  # 仅训练 ML 模型
     python main.py --sync-data              # 仅同步数据
@@ -21,6 +21,7 @@ v2.1 变更：
 import argparse
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from config.loader import load_config
@@ -42,6 +43,22 @@ import numpy as np
 import pandas as pd
 
 logger = get_logger("main")
+
+
+def _resolve_bt_snapshot_path(args: argparse.Namespace, mode: str) -> str:
+    """
+    未指定 --bt-snapshot 时，按回测类型使用不同默认文件名，避免互相覆盖。
+    mode: v2_regime | v2_no_regime | v1_ml
+    """
+    if getattr(args, "bt_snapshot", None):
+        return args.bt_snapshot
+    if mode == "v2_regime":
+        return "backtest_v2_regime_snapshot.txt"
+    if mode == "v2_no_regime":
+        return "backtest_v2_no_regime_snapshot.txt"
+    if mode == "v1_ml":
+        return "backtest_v1_ml_snapshot.txt"
+    return "backtest_snapshot.txt"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -306,10 +323,13 @@ def cmd_backtest(args):
     """
     config = load_config(args.config)
     storage = Storage(config.get_nested("data.database.path", "data/quant.db"))
+    db_path = config.get_nested("data.database.path", "data/quant.db")
     windows = config.get_nested("features.lookback_windows",
                                  [5, 10, 20, 60, 120, 240, 480])
     feature_engine = FeatureEngine(windows=windows)
     lookback = max(windows) + 20
+    snapshot_path = _resolve_bt_snapshot_path(args, "v1_ml")
+    snapshot_blocks: list[str] = []
 
     for symbol in config.get_symbols():
         df = storage.get_klines(symbol, "1h")
@@ -416,7 +436,26 @@ def cmd_backtest(args):
 
         report = generate_report(eq, tp, frequency="1h")
         print(format_report(report))
+        snapshot_blocks.append(
+            f"{'=' * 60}\nSYMBOL: {symbol}\n{'=' * 60}\n" + format_report(report)
+        )
         logger.info(f"{symbol} 回测完成: 共 {window_count} 个窗口, {trade_count} 笔交易")
+
+    if snapshot_blocks:
+        header = "\n".join(
+            [
+                "=" * 70,
+                "BACKTEST SNAPSHOT v1 (ML rolling windows)",
+                f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                f"Database: {db_path}",
+                "=" * 70,
+                "",
+            ]
+        )
+        body = "\n\n".join(snapshot_blocks)
+        with open(snapshot_path, "w", encoding="utf-8") as f:
+            f.write(header + body + "\n")
+        logger.info(f"快照已保存: {snapshot_path}")
 
 
 def cmd_backtest_v2(args):
@@ -456,7 +495,9 @@ def cmd_backtest_v2(args):
 
     report = engine.run()
     if report:
-        write_snapshot(report, args.bt_snapshot, db_path,
+        mode = "v2_no_regime" if args.no_regime else "v2_regime"
+        snapshot_path = _resolve_bt_snapshot_path(args, mode)
+        write_snapshot(report, snapshot_path, db_path,
                        args.bt_start, args.bt_end)
 
 
@@ -750,9 +791,15 @@ def main():
                         help="回测起始日期 YYYY-MM-DD")
     parser.add_argument("--bt-end", type=str, default=None,
                         help="回测结束日期 YYYY-MM-DD")
-    parser.add_argument("--bt-snapshot", type=str,
-                        default="backtest_snapshot.txt",
-                        help="回测快照输出路径")
+    parser.add_argument(
+        "--bt-snapshot",
+        type=str,
+        default=None,
+        help="回测快照输出路径；省略时按类型自动命名："
+        "v2+regime→backtest_v2_regime_snapshot.txt，"
+        "v2+--no-regime→backtest_v2_no_regime_snapshot.txt，"
+        "--backtest→backtest_v1_ml_snapshot.txt",
+    )
     parser.add_argument("--bt-risk", type=float, default=None,
                         help="单笔风险比例")
     parser.add_argument("--bt-trail", type=float, default=None,

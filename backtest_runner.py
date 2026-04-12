@@ -718,8 +718,13 @@ def main():
                         help="起始日期 YYYY-MM-DD")
     parser.add_argument("--end", type=str, default=None,
                         help="结束日期 YYYY-MM-DD")
-    parser.add_argument("--snapshot", type=str, default="backtest_snapshot.txt",
-                        help="快照输出路径")
+    parser.add_argument(
+        "--snapshot",
+        type=str,
+        default=None,
+        help="快照输出路径；省略时：开启 regime 为 backtest_v2_regime_snapshot.txt，"
+        "--no-regime 为 backtest_v2_no_regime_snapshot.txt",
+    )
     parser.add_argument("--no-regime", action="store_true",
                         help="关闭 regime 过滤（对照组，测试 regime 效果）")
 
@@ -767,7 +772,12 @@ def main():
     report = engine.run()
 
     if report:
-        write_snapshot(report, args.snapshot, str(db_path),
+        snap = args.snapshot or (
+            "backtest_v2_no_regime_snapshot.txt"
+            if args.no_regime
+            else "backtest_v2_regime_snapshot.txt"
+        )
+        write_snapshot(report, snap, str(db_path),
                        args.start, args.end)
 
 

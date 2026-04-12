@@ -1,6 +1,6 @@
 ======================================================================
 BACKTEST SNAPSHOT v2 (Regime-Adaptive)
-Generated: 2026-04-12 19:10:56
+Generated: 2026-04-12 19:15:05
 Database: data/quant.db
 Period: 2025-01-01 ~ all
 ======================================================================
@@ -17,7 +17,7 @@ SECTION: SUMMARY
   max_drawdown_pct: 67.3
   sharpe_ratio: 0.06
   regime_filter: False
-  elapsed_seconds: 4.0
+  elapsed_seconds: 4.3
 
 ======================================================================
 SECTION: TRADES_OVERVIEW
