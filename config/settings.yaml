@@ -4,10 +4,11 @@
 
 system:
   name: "CryptoQuant Engine"
-  version: "2.0.0"
+  version: "3.0.0"
   mode: "paper"                     # paper / live / backtest
   log_level: "INFO"
   timezone: "UTC"
+  paper_capital: 10000.0             # 模拟盘初始资金
 
 # ============================================================
 # 交易所连接
@@ -220,7 +221,7 @@ portfolio:
 # ============================================================
 execution:
   # 执行算法
-  algo: "twap"                       # market / limit / twap / vwap / iceberg
+  algo: "market"                     # 小资金默认直接成交，避免 TWAP 过度复杂
   
   twap:
     total_slices: 5                  # 拆分为 N 个子单
@@ -288,6 +289,66 @@ risk:
     consecutive_losses: 5                # 连续亏损5笔
     cooldown_hours: 4                    # 熔断冷却期
     auto_liquidate: false                # 是否自动清仓
+
+# ============================================================
+# 规则策略主线
+# ============================================================
+strategy:
+  name: "triple_ema"               # triple_ema / macd_momentum / regime
+
+  common:
+    primary_interval: "4h"
+    higher_interval: "1d"
+    commission_pct: 0.001
+    slippage_pct: 0.001
+    min_trade_value: 12.0
+
+  triple_ema:
+    min_adx: 18.0
+    min_rsi: 45.0
+    max_rsi: 72.0
+    min_volume_ratio: 0.90
+    pullback_min_atr: -0.90
+    pullback_max_atr: 0.60
+    trail_atr_mult: 2.8
+    stop_atr_mult: 2.0
+    ema_stop_buffer_atr: 0.5
+    max_holding_bars: 45
+    cooldown_bars: 6
+    risk_per_trade: 0.015
+    max_position_pct: 0.50
+
+  macd_momentum:
+    min_adx: 16.0
+    min_rsi: 48.0
+    max_rsi: 74.0
+    min_volume_ratio: 0.90
+    trail_atr_mult: 2.5
+    stop_atr_mult: 2.0
+    max_holding_bars: 36
+    cooldown_bars: 5
+    risk_per_trade: 0.012
+    max_position_pct: 0.45
+
+  regime:
+    allow_weak_regime: false
+    rsi_low: 45.0
+    rsi_high: 68.0
+    adx_min: 20.0
+    adx_min_weak: 24.0
+    dist_ema_min_atr: -1.0
+    dist_ema_max_atr: 0.70
+    vol_ratio_min: 0.90
+    trailing_atr_mult: 2.8
+    take_profit_atr_mult: 6.0
+    stop_atr_mult: 2.0
+    max_holding_bars: 40
+    time_stop_min_profit: 0.010
+    risk_per_trade: 0.012
+    risk_per_trade_weak: 0.006
+    max_position_pct: 0.40
+    cooldown_bars: 6
+
 
 # ============================================================
 # 监控告警

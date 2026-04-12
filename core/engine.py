@@ -1,6 +1,14 @@
 """
-主交易引擎 —— 串联所有模块的中枢
+主交易引擎 —— 统一规则策略与执行层
+
+本版核心变化：
+- 通过 strategy_registry 统一选择策略
+- 默认走 4h 主周期 + 1d 高级别过滤
+- 修复 paper/live 的现金与 NAV 计算
+- 回测与实盘共用同一套策略类
 """
+from __future__ import annotations
+
 import time
 import traceback
 from datetime import datetime
@@ -9,14 +17,13 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from config.loader import Config, load_config
-from core.events import EventBus, Event, EventType
+from alpha.strategy_registry import build_strategy
+from config.loader import Config
+from core.events import EventBus
 from data.client import BinanceClient
-from data.storage import Storage
-from data.historical import HistoryDownloader
 from data.features import FeatureEngine
-from alpha.ml_model import AlphaModel
-from alpha.portfolio import PortfolioOptimizer
+from data.historical import HistoryDownloader
+from data.storage import Storage
 from execution.executor import OrderExecutor
 from execution.position import PositionTracker
 from risk.manager import RiskManager
@@ -27,272 +34,339 @@ logger = get_logger("engine")
 
 class TradingEngine:
     """
-    量化交易引擎
-    生命周期: init → warmup (数据+模型) → run_loop
+    生命周期：init → warmup → run_cycle / run
     """
 
-    def __init__(self, config: Config, simulate: bool = True):
+    def __init__(self, config: Config, simulate: bool = True, strategy_name: str | None = None):
         self.config = config
         self.simulate = simulate
 
-        # 核心总线
         self.event_bus = EventBus()
 
-        # 数据层
         db_path = config.get_nested("data.database.path", "data/quant.db")
         cache_mb = config.get_nested("data.database.cache_size_mb", 256)
         self.storage = Storage(db_path, cache_size_mb=cache_mb)
         self.client = BinanceClient(config)
         self.history = HistoryDownloader(config, self.client, self.storage)
         self.feature_engine = FeatureEngine(
-            windows=config.get_nested("features.lookback_windows", [5, 10, 20, 60, 120, 240, 480]))
+            windows=config.get_nested("features.lookback_windows", [5, 10, 20, 60, 120, 240, 480])
+        )
 
-        # Alpha 层
-        self.alpha_model = AlphaModel(config, self.storage)
-        self.portfolio_opt = PortfolioOptimizer(config)
-
-        # 执行层
         self.position_tracker = PositionTracker()
         self.executor = OrderExecutor(
-            config, self.client, self.storage,
-            self.position_tracker, self.event_bus, simulate=simulate)
-
-        # 风控层
-        self._initial_capital = 10000.0  # 默认，warmup 时更新
-        self.risk_mgr = RiskManager(
-            config, self.position_tracker, self.event_bus, self._initial_capital)
+            config,
+            self.client,
+            self.storage,
+            self.position_tracker,
+            self.event_bus,
+            simulate=simulate,
+        )
 
         self.symbols = config.get_symbols()
+        self.strategy = build_strategy(config=config, explicit_name=strategy_name)
+        self.strategy_states: dict[str, dict] = {
+            symbol: {"bar_index": -1, "cooldown_until_bar": -1} for symbol in self.symbols
+        }
+        self.strategy_positions: dict[str, Optional[dict]] = {symbol: None for symbol in self.symbols}
+
+        self._initial_capital = float(config.get_nested("system.paper_capital", 10000.0))
+        self.cash = self._initial_capital
+        self.last_nav = self._initial_capital
+
+        self.risk_mgr = RiskManager(
+            config=config,
+            position_tracker=self.position_tracker,
+            event_bus=self.event_bus,
+            initial_capital=self._initial_capital,
+        )
+
         self.cycle_count = 0
         self._running = False
 
-        mode = "模拟" if simulate else "实盘"
-        logger.info(f"交易引擎初始化 | 模式={mode} | 标的={self.symbols}")
+        mode = "paper" if simulate else "live"
+        logger.info(
+            f"交易引擎初始化 | mode={mode} | strategy={self.strategy.name} | "
+            f"intervals={self.strategy.primary_interval}/{self.strategy.higher_interval} | "
+            f"symbols={self.symbols}"
+        )
 
     # ==============================================================
-    # Phase 1: 预热
+    # Warmup
     # ==============================================================
-    def warmup(self, skip_history: bool = False, skip_train: bool = False):
-        """
-        预热阶段：
-        1. 连接验证
-        2. 同步历史数据
-        3. 训练/加载模型
-        """
+    def warmup(self, skip_history: bool = False, skip_train: bool = True):
         logger.info("=" * 60)
         logger.info("  预热阶段开始")
         logger.info("=" * 60)
 
-        # 1. 连接测试
         if not self.simulate:
             try:
                 balances = self.client.get_balances()
                 usdt = balances.get("USDT", {})
-                self._initial_capital = usdt.get("free", 0) + usdt.get("locked", 0)
+                self._initial_capital = float(usdt.get("free", 0)) + float(usdt.get("locked", 0))
+                self.cash = self._initial_capital
+                self.last_nav = self._initial_capital
                 self.risk_mgr.initial_capital = self._initial_capital
                 self.risk_mgr.peak_nav = self._initial_capital
                 self.risk_mgr.daily_start_nav = self._initial_capital
-                logger.info(f"账户余额: {self._initial_capital:.2f} USDT")
-            except Exception as e:
-                logger.error(f"账户连接失败: {e}")
-                if not self.simulate:
-                    raise
+                self.risk_mgr.weekly_start_nav = self._initial_capital
+                logger.info(f"账户 USDT 余额: {self._initial_capital:.2f}")
+            except Exception as exc:
+                logger.error(f"账户连接失败: {exc}")
+                raise
 
-        # 2. 同步历史数据
         if not skip_history:
-            logger.info("开始同步历史数据...")
-            try:
-                results = self.history.sync_all(max_workers=2)
-                # 数据质量报告
-                for symbol in self.symbols:
-                    for tf in self.config.get_timeframes():
-                        report = self.history.validate_data(symbol, tf["interval"])
-                        logger.info(f"  {symbol}/{tf['interval']}: "
-                                    f"{report.get('count', 0)} 条 | "
-                                    f"缺口={report.get('gaps', 0)} | "
-                                    f"状态={report.get('status', 'unknown')}")
-            except Exception as e:
-                logger.error(f"历史数据同步失败: {e}")
-
-        # 3. 模型训练/加载
-        if not skip_train:
-            self._train_or_load_model()
+            self._sync_history()
 
         self.event_bus.start()
         logger.info("预热完成")
 
-    def _train_or_load_model(self):
-        """训练或加载已有模型"""
+    def _sync_history(self):
+        logger.info("开始同步历史数据...")
         try:
-            self.alpha_model.load()
-            logger.info("已加载历史模型")
-        except FileNotFoundError:
-            logger.info("无历史模型，开始训练...")
-            self._train_model()
+            self.history.sync_all(max_workers=2)
+            tracked_intervals = {self.strategy.primary_interval}
+            if self.strategy.higher_interval:
+                tracked_intervals.add(self.strategy.higher_interval)
 
-    def _train_model(self):
-        """训练 ML 模型"""
-        # 使用最长时间框架的数据训练
-        primary_tf = "1h"
-        for symbol in self.symbols:
-            df = self.storage.get_klines(symbol, primary_tf)
-            if len(df) < 1000:
-                logger.warning(f"{symbol} 数据不足 ({len(df)})，跳过训练")
-                continue
-
-            logger.info(f"为 {symbol} 计算特征... ({len(df)} 条K线)")
-            features = self.feature_engine.compute_all(
-                df, include_target=True, target_periods=[1, 4, 24])
-
-            if features.empty:
-                continue
-
-            features = self.feature_engine.preprocess(features, method="zscore")
-
-            try:
-                report = self.alpha_model.train(features, target_col="target_dir_1")
-                logger.info(f"模型训练完成: {report['model_id']}")
-                logger.info(f"  平均指标: {report['avg_metrics']}")
-                logger.info(f"  Top 5 特征: {list(report['top_features'].items())[:5]}")
-                break  # 目前只用第一个标的训练
-            except Exception as e:
-                logger.error(f"训练失败: {e}\n{traceback.format_exc()}")
+            for symbol in self.symbols:
+                for interval in tracked_intervals:
+                    report = self.history.validate_data(symbol, interval)
+                    logger.info(
+                        f"{symbol}/{interval}: {report.get('count', 0)} 条 | "
+                        f"缺口={report.get('gaps', 0)} | 状态={report.get('status', 'unknown')}"
+                    )
+        except Exception as exc:
+            logger.error(f"历史数据同步失败: {exc}")
 
     # ==============================================================
-    # Phase 2: 交易循环
+    # Main cycle
     # ==============================================================
     def run_cycle(self):
-        """运行一轮完整的交易循环"""
         self.cycle_count += 1
         logger.info(f"\n{'━' * 60}")
-        logger.info(f"  交易循环 #{self.cycle_count} | {datetime.utcnow().isoformat()}Z")
+        logger.info(f"交易循环 #{self.cycle_count} | {datetime.utcnow().isoformat()}Z")
         logger.info(f"{'━' * 60}")
 
-        # 1. 增量数据更新
         self._update_data()
-
-        # 2. 获取最新价格
         prices = self._get_prices()
         if not prices:
-            logger.error("无法获取价格，跳过本轮")
+            logger.error("价格获取失败，跳过本轮")
             return
 
-        # 3. 更新持仓极值
         self.position_tracker.update_all_extremes(prices)
 
-        # 4. Portfolio 风控检查
         nav = self._calculate_nav(prices)
+        cycle_ret = (nav - self.last_nav) / max(self.last_nav, 1e-12)
+        self.risk_mgr.record_return(cycle_ret)
+        self.last_nav = nav
+
         port_ok, port_msg = self.risk_mgr.check_portfolio(nav)
         logger.info(f"组合风控: {port_msg}")
-
         if not port_ok:
-            logger.warning("组合风控未通过，跳过信号生成")
             self._log_status(prices, nav)
             return
 
-        # 5. Position 风控（止损止盈）
         risk_actions = self.risk_mgr.check_positions(prices)
         for action in risk_actions:
-            logger.warning(f"风控平仓: {action['symbol']} | {action['reason']}")
-            self.executor.execute(
-                action["symbol"], "SELL", action["qty"],
-                action["price"], strategy="risk_control", algo="market")
-            self.risk_mgr.record_trade_result(-1)  # 止损视为亏损
+            self._force_close_from_risk(action, nav, prices)
 
-        # 6. 生成信号
+        nav = self._calculate_nav(prices)
         for symbol in self.symbols:
             self._process_symbol(symbol, prices, nav)
 
-        # 7. 状态汇报
+        nav = self._calculate_nav(prices)
         self._log_status(prices, nav)
 
-    def _process_symbol(self, symbol: str, prices: dict, nav: float):
-        """处理单个标的的信号生成和执行"""
-        df = self.storage.get_klines(symbol, "1h")
-        if len(df) < 500:
-            logger.debug(f"{symbol} 数据不足，跳过")
+    def _prepare_symbol_features(self, symbol: str) -> Optional[pd.DataFrame]:
+        primary_df = self.storage.get_klines(symbol, self.strategy.primary_interval)
+        if len(primary_df) < 200:
+            logger.debug(f"{symbol}: {self.strategy.primary_interval} 数据不足 ({len(primary_df)})")
+            return None
+
+        for col in ["open", "high", "low", "close", "volume"]:
+            if col in primary_df.columns:
+                primary_df[col] = pd.to_numeric(primary_df[col], errors="coerce")
+        primary_df = primary_df.dropna(subset=["open", "high", "low", "close", "volume"])
+
+        primary_feat = self.feature_engine.compute_all(primary_df)
+        if primary_feat.empty:
+            return None
+        for col in ["open_time", "open", "high", "low", "close", "volume"]:
+            if col in primary_df.columns:
+                primary_feat[col] = primary_df[col].values[-len(primary_feat):]
+
+        higher_feat = None
+        if self.strategy.higher_interval:
+            higher_df = self.storage.get_klines(symbol, self.strategy.higher_interval)
+            if len(higher_df) >= 80:
+                for col in ["open", "high", "low", "close", "volume"]:
+                    if col in higher_df.columns:
+                        higher_df[col] = pd.to_numeric(higher_df[col], errors="coerce")
+                higher_df = higher_df.dropna(subset=["open", "high", "low", "close", "volume"])
+                higher_feat = self.feature_engine.compute_all(higher_df)
+                if not higher_feat.empty:
+                    for col in ["open_time", "open", "high", "low", "close", "volume"]:
+                        if col in higher_df.columns:
+                            higher_feat[col] = higher_df[col].values[-len(higher_feat):]
+
+        prepared = self.strategy.prepare_features(primary_feat, higher_feat)
+        prepared = prepared.dropna(subset=["close"]).reset_index(drop=True)
+        return prepared if len(prepared) >= 2 else None
+
+    def _process_symbol(self, symbol: str, prices: dict[str, float], nav: float):
+        prepared = self._prepare_symbol_features(symbol)
+        if prepared is None:
             return
 
-        # 特征计算
-        features = self.feature_engine.compute_all(df)
-        if features.empty:
-            return
-        features = self.feature_engine.preprocess(features, method="zscore")
+        row = prepared.iloc[-1]
+        prev_row = prepared.iloc[-2]
+        current_price = prices.get(symbol, float(row["close"]))
 
-        # ML 预测
-        if self.alpha_model.model is None:
-            return
+        state = self.strategy_states[symbol]
+        state["bar_index"] = len(prepared) - 1
 
-        try:
-            predictions = self.alpha_model.predict(features)
-            latest = predictions.iloc[-1]
-            signal = latest["signal"]
-            strength = latest["strength"]
-            probability = latest["probability"]
-        except Exception as e:
-            logger.error(f"{symbol} 预测失败: {e}")
-            return
+        signal_meta = self.strategy.signal_metadata(row)
+        self.storage.save_signal(
+            {
+                "symbol": symbol,
+                "timestamp": int(time.time() * 1000),
+                "strategy": self.strategy.name,
+                "direction": signal_meta.get("tag", "hold"),
+                "strength": signal_meta.get("strength", 0.0),
+                "confidence": None,
+                "features": None,
+                "model_version": self.strategy.name,
+            }
+        )
 
         logger.info(
-            f"[{symbol}] 信号={signal} | 强度={strength:.3f} | "
-            f"概率={probability:.3f} | 价格={prices.get(symbol, 0):.2f}")
+            f"[{symbol}] price={current_price:.2f} | signal={signal_meta.get('tag')} | "
+            f"strength={signal_meta.get('strength', 0):.3f}"
+        )
 
-        # 记录信号
-        self.storage.save_signal({
-            "symbol": symbol,
-            "timestamp": int(time.time() * 1000),
-            "strategy": "ml_ensemble",
-            "direction": signal,
-            "strength": strength,
-            "confidence": probability,
-            "model_version": self.alpha_model.model_id,
-        })
+        position = self.strategy_positions.get(symbol)
 
-        if signal == "HOLD":
-            return
+        if position is not None:
+            position["highest_since_entry"] = max(position["highest_since_entry"], current_price)
+            position["lowest_since_entry"] = min(position["lowest_since_entry"], current_price)
+            bar_count = state["bar_index"] - position["entry_bar"]
 
-        # Pre-trade 风控
-        current_price = prices[symbol]
-        pos = self.position_tracker.get_position(symbol)
+            should_exit, reason = self.strategy.check_exit(row, prev_row, position, bar_count)
+            if should_exit:
+                qty = position["qty"]
+                ok, risk_reason = self.risk_mgr.pre_trade_check(symbol, "SELL", qty, current_price, nav, prices)
+                if ok:
+                    result = self.executor.execute(
+                        symbol=symbol,
+                        side="SELL",
+                        qty=qty,
+                        price=current_price,
+                        strategy=self.strategy.name,
+                        algo=self.config.execution.algo,
+                    )
+                    if result:
+                        self._apply_sell_cash(result)
+                        pnl = (result["avg_fill_price"] - position["entry_price"]) * qty - result.get("commission", 0)
+                        self.risk_mgr.record_trade_result(pnl)
+                        self.strategy.on_trade_closed(state, state["bar_index"], reason)
+                        self.strategy_positions[symbol] = None
+                        self.risk_mgr.record_order()
+                        logger.info(
+                            f"[{symbol}] 平仓 | reason={reason} | qty={qty:.6f} | "
+                            f"fill={result['avg_fill_price']:.2f} | pnl={pnl:+.2f}"
+                        )
+                else:
+                    logger.warning(f"[{symbol}] 平仓被风控拒绝: {risk_reason}")
+                return
 
-        if signal in ("BUY", "STRONG_BUY") and (not pos or not pos.is_open):
-            # 计算下单量
-            position_value = nav * 0.20 * strength  # 最大20%仓位 × 信号强度
-            qty = position_value / current_price
+        if position is None and self.strategy.should_enter(row=row, prev_row=prev_row, state=state):
+            qty, stop_loss = self.strategy.calc_position(self.cash, current_price, row)
+            if qty <= 0:
+                return
 
-            ok, reason = self.risk_mgr.pre_trade_check(
-                symbol, "BUY", qty, current_price, nav, prices)
-            if ok:
-                self.executor.execute(
-                    symbol, "BUY", qty, current_price,
-                    strategy="ml_ensemble", algo=self.config.execution.algo)
+            ok, risk_reason = self.risk_mgr.pre_trade_check(symbol, "BUY", qty, current_price, nav, prices)
+            if not ok:
+                logger.info(f"[{symbol}] 开仓被风控拒绝: {risk_reason}")
+                return
+
+            result = self.executor.execute(
+                symbol=symbol,
+                side="BUY",
+                qty=qty,
+                price=current_price,
+                strategy=self.strategy.name,
+                algo=self.config.execution.algo,
+            )
+            if result:
+                self._apply_buy_cash(result)
+                self.strategy_positions[symbol] = {
+                    "qty": result.get("executed_qty", qty),
+                    "entry_price": result.get("avg_fill_price", current_price),
+                    "entry_bar": state["bar_index"],
+                    "entry_time": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+                    "stop_loss": stop_loss,
+                    "highest_since_entry": current_price,
+                    "lowest_since_entry": current_price,
+                    "atr_at_entry": float(row.get("natr_20", 0) or 0) * current_price,
+                }
                 self.risk_mgr.record_order()
-            else:
-                logger.info(f"[{symbol}] 风控拒绝: {reason}")
-
-        elif signal in ("SELL", "STRONG_SELL") and pos and pos.is_open:
-            ok, reason = self.risk_mgr.pre_trade_check(
-                symbol, "SELL", pos.quantity, current_price, nav, prices)
-            if ok:
-                result = self.executor.execute(
-                    symbol, "SELL", pos.quantity, current_price,
-                    strategy="ml_ensemble", algo="market")
-                self.risk_mgr.record_order()
-            else:
-                logger.info(f"[{symbol}] 风控拒绝: {reason}")
+                logger.info(
+                    f"[{symbol}] 开仓 | qty={qty:.6f} | fill={result['avg_fill_price']:.2f} | "
+                    f"stop={stop_loss:.2f}"
+                )
 
     # ==============================================================
-    # 辅助方法
+    # Cash / NAV helpers
+    # ==============================================================
+    def _apply_buy_cash(self, result: dict):
+        fill_price = float(result.get("avg_fill_price", result.get("price", 0.0)) or 0.0)
+        qty = float(result.get("executed_qty", result.get("quantity", 0.0)) or 0.0)
+        commission = float(result.get("commission", 0.0) or 0.0)
+        self.cash -= qty * fill_price + commission
+
+    def _apply_sell_cash(self, result: dict):
+        fill_price = float(result.get("avg_fill_price", result.get("price", 0.0)) or 0.0)
+        qty = float(result.get("executed_qty", result.get("quantity", 0.0)) or 0.0)
+        commission = float(result.get("commission", 0.0) or 0.0)
+        self.cash += qty * fill_price - commission
+
+    def _calculate_nav(self, prices: dict[str, float]) -> float:
+        exposure = self.position_tracker.get_total_exposure(prices)
+        return self.cash + exposure
+
+    def _force_close_from_risk(self, action: dict, nav: float, prices: dict[str, float]):
+        symbol = action["symbol"]
+        result = self.executor.execute(
+            symbol=symbol,
+            side="SELL",
+            qty=action["qty"],
+            price=action["price"],
+            strategy="risk_control",
+            algo="market",
+        )
+        if result:
+            self._apply_sell_cash(result)
+            self.strategy_positions[symbol] = None
+            self.risk_mgr.record_trade_result(-1.0)
+            self.risk_mgr.record_order()
+            logger.warning(f"风控平仓: {symbol} | {action['reason']}")
+
+    # ==============================================================
+    # Data helpers
     # ==============================================================
     def _update_data(self):
-        """增量更新最新数据"""
+        intervals = {self.strategy.primary_interval}
+        if self.strategy.higher_interval:
+            intervals.add(self.strategy.higher_interval)
+
         for symbol in self.symbols:
-            try:
-                df = self.client.get_klines(symbol, "1h", limit=10)
-                if not df.empty:
-                    self.storage.upsert_klines(symbol, "1h", df)
-            except Exception as e:
-                logger.error(f"更新 {symbol} 数据失败: {e}")
+            for interval in intervals:
+                try:
+                    df = self.client.get_klines(symbol, interval, limit=10)
+                    if not df.empty:
+                        self.storage.upsert_klines(symbol, interval, df)
+                except Exception as exc:
+                    logger.error(f"更新 {symbol}/{interval} 失败: {exc}")
 
     def _get_prices(self) -> dict[str, float]:
         prices = {}
@@ -300,37 +374,31 @@ class TradingEngine:
             try:
                 prices[symbol] = self.client.get_ticker_price(symbol)
             except Exception:
-                df = self.storage.get_klines(symbol, "1h", limit=1)
+                df = self.storage.get_klines(symbol, self.strategy.primary_interval, limit=1)
                 if not df.empty:
                     prices[symbol] = float(df["close"].iloc[-1])
         return prices
 
-    def _calculate_nav(self, prices: dict) -> float:
-        cash = self._initial_capital
-        # 减去买入花费，加上卖出收入（简化版）
-        exposure = self.position_tracker.get_total_exposure(prices)
-        upnl = self.position_tracker.get_total_unrealized_pnl(prices)
-        return cash + upnl
-
-    def _log_status(self, prices: dict, nav: float):
+    def _log_status(self, prices: dict[str, float], nav: float):
         risk_snap = self.risk_mgr.get_risk_snapshot(nav, prices)
         port_summary = self.position_tracker.get_portfolio_summary(prices)
 
-        logger.info(f"💰 NAV={nav:.2f} | 回撤={risk_snap['drawdown_pct']:.2%} | "
-                    f"日PnL={risk_snap['daily_pnl_pct']:+.2%} | "
-                    f"敞口={risk_snap['exposure_pct']:.1%} | "
-                    f"持仓={risk_snap['open_positions']}")
+        logger.info(
+            f"💰 NAV={nav:.2f} | cash={self.cash:.2f} | DD={risk_snap['drawdown_pct']:.2%} | "
+            f"日PnL={risk_snap['daily_pnl_pct']:+.2%} | 敞口={risk_snap['exposure_pct']:.1%} | "
+            f"持仓={risk_snap['open_positions']}"
+        )
 
         for sym, info in port_summary["positions"].items():
-            logger.info(f"  📊 {sym}: qty={info['qty']:.6f} "
-                        f"价值={info['market_value']:.2f} "
-                        f"浮盈={info['upnl_pct']:+.2%}")
+            logger.info(
+                f"  📊 {sym}: qty={info['qty']:.6f} | value={info['market_value']:.2f} | "
+                f"upnl={info['upnl_pct']:+.2%}"
+            )
 
     # ==============================================================
-    # 运行
+    # Run loop
     # ==============================================================
     def run(self, interval_seconds: int = 3600):
-        """持续运行"""
         self._running = True
         logger.info(f"交易循环启动 | 间隔={interval_seconds}s")
 
@@ -338,9 +406,8 @@ class TradingEngine:
             while self._running:
                 try:
                     self.run_cycle()
-                except Exception as e:
-                    logger.error(f"循环异常: {e}\n{traceback.format_exc()}")
-                logger.info(f"下轮 {interval_seconds}s 后...")
+                except Exception as exc:
+                    logger.error(f"循环异常: {exc}\n{traceback.format_exc()}")
                 time.sleep(interval_seconds)
         except KeyboardInterrupt:
             logger.info("用户中断")
@@ -350,5 +417,7 @@ class TradingEngine:
     def shutdown(self):
         self._running = False
         self.event_bus.stop()
-        logger.info(f"引擎关闭 | 共运行 {self.cycle_count} 轮 | "
-                    f"执行统计: {self.executor.stats}")
+        logger.info(
+            f"引擎关闭 | cycles={self.cycle_count} | cash={self.cash:.2f} | "
+            f"stats={self.executor.stats}"
+        )
