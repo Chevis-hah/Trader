@@ -9,6 +9,7 @@
     python main.py --train                  # 仅训练模型
     python main.py --sync-data              # 仅同步数据
     python main.py --validate               # 数据质量检查
+    python main.py --network-probe          # 本机检测代理与 Binance REST 连通（需在 WSL/本机执行）
     python main.py --config path/to/cfg.yaml # 指定配置文件
 """
 import argparse
@@ -17,7 +18,7 @@ from pathlib import Path
 
 from config.loader import load_config
 from core.engine import TradingEngine
-from data.client import BinanceClient
+from data.client import BinanceAPIError, BinanceClient
 from data.storage import Storage
 from data.historical import HistoryDownloader
 from data.features import FeatureEngine
@@ -43,6 +44,49 @@ def cmd_run(args):
         engine.shutdown()
     else:
         engine.run(interval_seconds=args.interval)
+
+
+def cmd_network_probe(args):
+    """
+    代理与 Binance REST 一键检测。Agent 无法替你执行此闭环（无你的 WSL/Clash/局域网）。
+    成功：打印 serverTime 并以退出码 0 结束；失败：退出码 1。
+    """
+    import requests
+    from data.client import network_probe_diagnostics
+
+    config = load_config(args.config)
+    logger.info("网络探测（仅反映当前机器；请在出现连接问题时于本机/WSL 运行本命令）")
+    diag = network_probe_diagnostics(config)
+    for key in sorted(diag.keys()):
+        logger.info(f"  {key}: {diag[key]}")
+
+    client = BinanceClient(config)
+    logger.info(f"  session.proxies: {dict(client._session.proxies)}")
+
+    try:
+        client._request("GET", "/api/v3/ping")
+        t = client.get_server_time()
+        logger.info(f"  Binance REST 正常 | serverTime(ms)={t}")
+        sys.exit(0)
+    except BinanceAPIError as e:
+        logger.error(f"  Binance API 响应: {e}")
+        if e.status_code == 451:
+            logger.error(
+                "  HTTP 451：代理已连通，但 Binance 认定当前出口 IP 位于受限地区（合规策略），"
+                "与 Allow LAN / wsl_host 无关。请在 Clash 中更换到 Binance 支持的地区的干净节点；"
+                "若浏览器访问 binance.com 同样提示地区限制，可佐证为出口地区问题。"
+            )
+        sys.exit(1)
+    except (requests.exceptions.ProxyError, requests.exceptions.ConnectionError) as e:
+        logger.error(f"  代理或 TCP 连接失败: {e}")
+        logger.error(
+            "  建议: Clash 开启 Allow LAN；核对 wsl_clash_port；"
+            "必要时设置 proxy.wsl_host 为 Windows 在 vEthernet(WSL) 上的 IP。"
+        )
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"  Binance REST 不可用: {e}")
+        sys.exit(1)
 
 
 def cmd_sync_data(args):
@@ -179,13 +223,20 @@ def main():
     parser.add_argument("--validate", action="store_true", help="数据质量检查")
     parser.add_argument("--train", action="store_true", help="仅训练模型")
     parser.add_argument("--backtest", action="store_true", help="回测")
+    parser.add_argument(
+        "--network-probe",
+        action="store_true",
+        help="检测代理与 Binance REST（需在本人电脑/WSL 上运行）",
+    )
     args = parser.parse_args()
 
     logger.info("=" * 60)
     logger.info("  Crypto Quant Engine v2.0")
     logger.info("=" * 60)
 
-    if args.sync_data:
+    if args.network_probe:
+        cmd_network_probe(args)
+    elif args.sync_data:
         cmd_sync_data(args)
     elif args.validate:
         cmd_validate(args)

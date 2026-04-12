@@ -4,13 +4,17 @@ Binance REST API 客户端
 - 请求速率限制
 - 完整错误处理
 - 请求延迟统计
+- 可选 HTTP(S) 代理（Clash 等）
 """
+import os
+import re
+import subprocess
 import time
 import hmac
 import hashlib
 import threading
 from collections import deque
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from typing import Optional, Any
 
 import requests
@@ -20,6 +24,168 @@ from config.loader import Config
 from utils.logger import get_logger
 
 logger = get_logger("client")
+
+
+def _is_wsl() -> bool:
+    try:
+        with open("/proc/version", "r", encoding="utf-8") as f:
+            v = f.read().lower()
+        return "microsoft" in v or "wsl" in v
+    except OSError:
+        return False
+
+
+# WSL 新版里 resolv.conf 的 nameserver 常为 10.255.255.254，仅作 DNS 转发，不能连 Clash 端口
+_WSL_BAD_NAMESERVERS = frozenset({"10.255.255.254", "127.0.0.1", "::1"})
+
+
+def _wsl_default_gateway() -> Optional[str]:
+    """WSL2 默认网关一般是 Windows 宿主机在 vSwitch 上的 IP，可访问 Allow LAN 后的 Clash。"""
+    try:
+        out = subprocess.run(
+            ["ip", "route", "show", "default"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if out.returncode != 0 or not (out.stdout or "").strip():
+            return None
+        m = re.search(r"^default\s+via\s+(\S+)", out.stdout.strip(), re.MULTILINE)
+        return m.group(1) if m else None
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def _wsl_resolv_nameservers() -> list[str]:
+    ips: list[str] = []
+    try:
+        with open("/etc/resolv.conf", "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("nameserver "):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        ips.append(parts[1])
+    except OSError:
+        pass
+    return ips
+
+
+def _wsl_windows_host_ip() -> Optional[str]:
+    """
+    优先 default via（ip route），再尝试 resolv.conf 里非伪地址的 nameserver。
+    """
+    gw = _wsl_default_gateway()
+    if gw:
+        return gw
+    for ip in _wsl_resolv_nameservers():
+        if ip not in _WSL_BAD_NAMESERVERS:
+            return ip
+    return None
+
+
+def _normalize_proxy_url(url: str) -> Optional[str]:
+    u = (url or "").strip()
+    if not u or u.startswith("${"):
+        return None
+    return u
+
+
+def _parse_wsl_host_field(val: Any) -> Optional[str]:
+    """配置项 wsl_host：纯 IP、或带端口 172.x.x.x:7890、或 http://172.x.x.x"""
+    if val is None:
+        return None
+    v = str(val).strip()
+    if not v or v.startswith("${"):
+        return None
+    if "://" in v:
+        h = urlparse(v).hostname
+        return h
+    return v.split(":")[0].strip() or None
+
+
+def _resolve_rest_proxy(config: Config, *, _log_wsl: bool = True) -> Optional[str]:
+    """
+    优先级：exchange.proxy（字符串或对象）→ wsl_clash_port（仅 WSL）→ 环境变量 HTTPS_PROXY / HTTP_PROXY。
+    """
+    exc = config.exchange
+    try:
+        p = exc.proxy
+    except AttributeError:
+        p = None
+
+    if isinstance(p, str):
+        url = _normalize_proxy_url(p)
+        d = {}
+    elif p is not None and hasattr(p, "to_dict"):
+        d = p.to_dict()
+        url = _normalize_proxy_url(
+            str(d.get("url") or d.get("https") or d.get("http") or ""))
+    elif p is not None and hasattr(p, "_data"):
+        d = p._data
+        url = _normalize_proxy_url(
+            str(d.get("url") or d.get("https") or d.get("http") or ""))
+    else:
+        d = {}
+        url = None
+
+    wsl_port = d.get("wsl_clash_port")
+    try:
+        wsl_port = int(wsl_port) if wsl_port is not None and str(wsl_port).strip() != "" else 0
+    except (TypeError, ValueError):
+        wsl_port = 0
+
+    # WSL 内 127.0.0.1 指向 Linux，Clash 在 Windows 上时应走宿主机 IP（优先网关，非 10.255.255.254）
+    if _is_wsl() and wsl_port > 0:
+        manual_host = _parse_wsl_host_field(d.get("wsl_host"))
+        host = manual_host or _wsl_windows_host_ip()
+        if host:
+            url = f"http://{host}:{wsl_port}"
+            if _log_wsl:
+                src = "wsl_host 手动" if manual_host else "自动(默认网关/resolv)"
+                logger.info(f"WSL REST 代理 | {url} | {src}")
+
+    if not url:
+        for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+            v = os.environ.get(key)
+            if v and v.strip():
+                url = v.strip()
+                break
+
+    return _normalize_proxy_url(url) if url else None
+
+
+def network_probe_diagnostics(config: Config) -> dict[str, Any]:
+    """
+    本机网络/代理诊断信息（供 main.py --network-probe 打印）。
+    在 Cursor Agent 的沙箱或云端无法访问你的 WSL/Clash，必须在用户机器上执行才能闭环。
+    """
+    d_proxy: dict = {}
+    try:
+        p = config.exchange.proxy
+        if isinstance(p, str):
+            d_proxy = {"url": p}
+        elif p is not None and hasattr(p, "to_dict"):
+            d_proxy = dict(p.to_dict())
+        elif p is not None and hasattr(p, "_data"):
+            d_proxy = dict(p._data)
+    except AttributeError:
+        pass
+    wsl = _is_wsl()
+    return {
+        "is_wsl": wsl,
+        "wsl_default_gateway": _wsl_default_gateway() if wsl else None,
+        "wsl_resolv_nameservers": _wsl_resolv_nameservers() if wsl else [],
+        "wsl_effective_host_auto": _wsl_windows_host_ip() if wsl else None,
+        "config_proxy_keys": {k: d_proxy.get(k) for k in ("url", "wsl_clash_port", "wsl_host") if k in d_proxy},
+        "resolved_rest_proxy": _resolve_rest_proxy(config, _log_wsl=False),
+        "rest_base_url": (
+            config.exchange.base_url_test
+            if config.exchange.testnet
+            else config.exchange.base_url_live
+        ),
+    }
 
 
 class RateLimiter:
@@ -80,6 +246,14 @@ class BinanceClient:
             "Content-Type": "application/x-www-form-urlencoded",
         })
 
+        proxy_url = _resolve_rest_proxy(config)
+        if proxy_url:
+            self._session.proxies = {"http": proxy_url, "https": proxy_url}
+            self._session.trust_env = False
+            logger.info(f"Binance REST 代理 | {proxy_url}")
+        else:
+            self._session.trust_env = True
+
         # 统计
         self._request_count = 0
         self._error_count = 0
@@ -135,6 +309,16 @@ class BinanceClient:
                     logger.error(f"418 IP被封禁 {ban_until}s")
                     time.sleep(int(ban_until))
                     continue
+
+                # 地区 / 合规限制（换 VPN 出口，非代码可修）
+                if resp.status_code == 451:
+                    body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+                    msg = body.get("msg", resp.text[:300])
+                    logger.error(
+                        "HTTP 451 地区受限: Binance 拒绝当前出口 IP。"
+                        "请更换代理节点到其服务条款允许的地区。"
+                    )
+                    raise BinanceAPIError(451, body.get("code", 0), msg)
 
                 # 可重试的错误
                 if resp.status_code in self._retry_on and attempt < self._max_retries:

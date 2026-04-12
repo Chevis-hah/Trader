@@ -17,6 +17,7 @@ exchange:
   api_key: "${BINANCE_API_KEY}"
   api_secret: "${BINANCE_API_SECRET}"
   testnet: false
+  # 若 REST 返回 HTTP 451「restricted location」：代理已通，需更换 Clash 节点到 Binance 允许的地区
   base_url_live: "https://api.binance.com"
   base_url_test: "https://testnet.binance.vision"
   ws_url_live: "wss://stream.binance.com:9443/ws"
@@ -35,6 +36,16 @@ exchange:
   timeout:
     connect: 5
     read: 15
+  # REST 走系统代理（如 Clash）
+  # - Windows 本机跑 Python：保留 url 即可（127.0.0.1:Clash 端口）
+  # - WSL 里跑 Python：设 wsl_clash_port 与 Clash HTTP 端口一致，并开启 Clash「Allow LAN」；
+  #   宿主机 IP 默认取 `ip route` 的 default via（勿用 resolv 里 10.255.255.254，该地址常无法连代理）
+  # - 自动仍失败时填写 wsl_host: "你的 Windows IP"（ipconfig 里 vEthernet WSL 对应网段）
+  # - url 留空时可依赖环境变量 HTTPS_PROXY / HTTP_PROXY
+  proxy:
+    url: "http://127.0.0.1:7890"
+    wsl_clash_port: 7890
+    wsl_host: ""
 
 # ============================================================
 # 交易标的
