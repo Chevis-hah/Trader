@@ -17,6 +17,8 @@ def annualization_factor(frequency: str = "1h") -> float:
 
 
 def total_return(equity_curve: np.ndarray) -> float:
+    if len(equity_curve) < 2:
+        return 0.0
     return (equity_curve[-1] / equity_curve[0]) - 1
 
 
@@ -32,6 +34,8 @@ def cagr(equity_curve: np.ndarray, periods_per_year: float = 8766) -> float:
 
 def max_drawdown(equity_curve: np.ndarray) -> tuple[float, int, int]:
     """最大回撤及其起止位置"""
+    if len(equity_curve) < 2:
+        return 0.0, 0, 0
     peak = np.maximum.accumulate(equity_curve)
     dd = (peak - equity_curve) / peak
     max_dd = dd.max()
@@ -42,6 +46,8 @@ def max_drawdown(equity_curve: np.ndarray) -> tuple[float, int, int]:
 
 def drawdown_duration(equity_curve: np.ndarray) -> int:
     """最长回撤持续期（bar 数）"""
+    if len(equity_curve) < 2:
+        return 0
     peak = np.maximum.accumulate(equity_curve)
     in_drawdown = equity_curve < peak
     max_dur = 0
@@ -58,15 +64,20 @@ def drawdown_duration(equity_curve: np.ndarray) -> int:
 def sharpe_ratio(returns: np.ndarray, rf_rate: float = 0.0,
                  periods_per_year: float = 8766) -> float:
     """年化夏普比率"""
-    excess = returns - rf_rate / periods_per_year
-    if excess.std() == 0:
+    if len(returns) < 2:
         return 0.0
-    return float(excess.mean() / excess.std() * np.sqrt(periods_per_year))
+    excess = returns - rf_rate / periods_per_year
+    std = excess.std()
+    if std == 0 or np.isnan(std):
+        return 0.0
+    return float(excess.mean() / std * np.sqrt(periods_per_year))
 
 
 def sortino_ratio(returns: np.ndarray, rf_rate: float = 0.0,
                   periods_per_year: float = 8766) -> float:
     """Sortino 比率（只计算下行波动）"""
+    if len(returns) < 2:
+        return 0.0
     excess = returns - rf_rate / periods_per_year
     downside = returns[returns < 0]
     if len(downside) == 0 or downside.std() == 0:
@@ -77,6 +88,8 @@ def sortino_ratio(returns: np.ndarray, rf_rate: float = 0.0,
 def calmar_ratio(equity_curve: np.ndarray,
                  periods_per_year: float = 8766) -> float:
     """Calmar 比率 = CAGR / MaxDrawdown"""
+    if len(equity_curve) < 2:
+        return 0.0
     mdd, _, _ = max_drawdown(equity_curve)
     if mdd == 0:
         return 0.0
@@ -85,6 +98,8 @@ def calmar_ratio(equity_curve: np.ndarray,
 
 def omega_ratio(returns: np.ndarray, threshold: float = 0.0) -> float:
     """Omega 比率"""
+    if len(returns) == 0:
+        return 0.0
     excess = returns - threshold
     gains = excess[excess > 0].sum()
     losses = -excess[excess < 0].sum()
@@ -94,6 +109,8 @@ def omega_ratio(returns: np.ndarray, threshold: float = 0.0) -> float:
 
 
 def win_rate(pnl_series: np.ndarray) -> float:
+    if len(pnl_series) == 0:
+        return 0.0
     wins = (pnl_series > 0).sum()
     total = (pnl_series != 0).sum()
     return float(wins / total) if total > 0 else 0.0
@@ -101,6 +118,8 @@ def win_rate(pnl_series: np.ndarray) -> float:
 
 def profit_factor(pnl_series: np.ndarray) -> float:
     """盈亏比"""
+    if len(pnl_series) == 0:
+        return 0.0
     gross_profit = pnl_series[pnl_series > 0].sum()
     gross_loss = abs(pnl_series[pnl_series < 0].sum())
     if gross_loss == 0:
@@ -110,6 +129,8 @@ def profit_factor(pnl_series: np.ndarray) -> float:
 
 def expectancy(pnl_series: np.ndarray) -> float:
     """期望收益 = 平均盈利 * 胜率 - 平均亏损 * 败率"""
+    if len(pnl_series) == 0:
+        return 0.0
     wins = pnl_series[pnl_series > 0]
     losses = pnl_series[pnl_series < 0]
     if len(wins) == 0 and len(losses) == 0:
@@ -124,17 +145,24 @@ def expectancy(pnl_series: np.ndarray) -> float:
 def value_at_risk(returns: np.ndarray, confidence: float = 0.95,
                   method: str = "historical") -> float:
     """VaR 计算"""
+    if len(returns) == 0:
+        return 0.0
     if method == "historical":
         return float(-np.percentile(returns, (1 - confidence) * 100))
     elif method == "parametric":
         from scipy.stats import norm
+        std = returns.std()
+        if std == 0 or np.isnan(std):
+            return 0.0
         z = norm.ppf(1 - confidence)
-        return float(-(returns.mean() + z * returns.std()))
+        return float(-(returns.mean() + z * std))
     return 0.0
 
 
 def conditional_var(returns: np.ndarray, confidence: float = 0.95) -> float:
     """条件 VaR（Expected Shortfall）"""
+    if len(returns) == 0:
+        return 0.0
     var = value_at_risk(returns, confidence)
     tail = returns[returns <= -var]
     return float(-tail.mean()) if len(tail) > 0 else var
@@ -143,6 +171,8 @@ def conditional_var(returns: np.ndarray, confidence: float = 0.95) -> float:
 def information_coefficient(predictions: np.ndarray,
                             actual_returns: np.ndarray) -> float:
     """信息系数 IC（Spearman rank correlation）"""
+    if len(predictions) < 3 or len(actual_returns) < 3:
+        return 0.0
     from scipy.stats import spearmanr
     corr, _ = spearmanr(predictions, actual_returns)
     return float(corr) if not np.isnan(corr) else 0.0
@@ -150,7 +180,7 @@ def information_coefficient(predictions: np.ndarray,
 
 def ic_ir(ic_series: np.ndarray) -> float:
     """IC 信息比率 = IC均值 / IC标准差"""
-    if ic_series.std() == 0:
+    if len(ic_series) < 2 or ic_series.std() == 0:
         return 0.0
     return float(ic_series.mean() / ic_series.std())
 
@@ -164,31 +194,49 @@ def generate_report(equity_curve: np.ndarray, trades_pnl: np.ndarray,
                     frequency: str = "1h") -> dict:
     """生成完整绩效报告"""
     ann = annualization_factor(frequency)
-    returns = np.diff(equity_curve) / equity_curve[:-1]
+
+    # 防空数组
+    if len(equity_curve) < 2:
+        returns = np.array([0.0])
+    else:
+        returns = np.diff(equity_curve) / equity_curve[:-1]
+        # 清理 NaN/Inf
+        returns = returns[np.isfinite(returns)]
+        if len(returns) == 0:
+            returns = np.array([0.0])
+
     mdd, mdd_start, mdd_end = max_drawdown(equity_curve)
 
+    # 安全计算统计量
+    def _safe_stat(func, *args, default=0.0):
+        try:
+            val = func(*args)
+            return val if np.isfinite(val) else default
+        except Exception:
+            return default
+
     report = {
-        "total_return": total_return(equity_curve),
-        "cagr": cagr(equity_curve, ann),
+        "total_return": _safe_stat(total_return, equity_curve),
+        "cagr": _safe_stat(cagr, equity_curve, ann),
         "max_drawdown": mdd,
         "max_dd_start": mdd_start,
         "max_dd_end": mdd_end,
         "max_dd_duration_bars": drawdown_duration(equity_curve),
-        "sharpe_ratio": sharpe_ratio(returns, 0.0, ann),
-        "sortino_ratio": sortino_ratio(returns, 0.0, ann),
-        "calmar_ratio": calmar_ratio(equity_curve, ann),
-        "omega_ratio": omega_ratio(returns),
-        "volatility_annual": float(returns.std() * np.sqrt(ann)),
-        "skewness": float(pd.Series(returns).skew()),
-        "kurtosis": float(pd.Series(returns).kurtosis()),
-        "var_95": value_at_risk(returns, 0.95),
-        "cvar_95": conditional_var(returns, 0.95),
-        "total_trades": int((trades_pnl != 0).sum()),
+        "sharpe_ratio": _safe_stat(sharpe_ratio, returns, 0.0, ann),
+        "sortino_ratio": _safe_stat(sortino_ratio, returns, 0.0, ann),
+        "calmar_ratio": _safe_stat(calmar_ratio, equity_curve, ann),
+        "omega_ratio": _safe_stat(omega_ratio, returns),
+        "volatility_annual": _safe_stat(lambda r: float(r.std() * np.sqrt(ann)), returns),
+        "skewness": _safe_stat(lambda r: float(pd.Series(r).skew()), returns),
+        "kurtosis": _safe_stat(lambda r: float(pd.Series(r).kurtosis()), returns),
+        "var_95": _safe_stat(value_at_risk, returns, 0.95),
+        "cvar_95": _safe_stat(conditional_var, returns, 0.95),
+        "total_trades": int((trades_pnl != 0).sum()) if len(trades_pnl) > 0 else 0,
         "win_rate": win_rate(trades_pnl),
         "profit_factor": profit_factor(trades_pnl),
         "expectancy": expectancy(trades_pnl),
-        "avg_win": float(trades_pnl[trades_pnl > 0].mean()) if (trades_pnl > 0).any() else 0,
-        "avg_loss": float(trades_pnl[trades_pnl < 0].mean()) if (trades_pnl < 0).any() else 0,
+        "avg_win": float(trades_pnl[trades_pnl > 0].mean()) if len(trades_pnl) > 0 and (trades_pnl > 0).any() else 0,
+        "avg_loss": float(trades_pnl[trades_pnl < 0].mean()) if len(trades_pnl) > 0 and (trades_pnl < 0).any() else 0,
         "best_trade": float(trades_pnl.max()) if len(trades_pnl) > 0 else 0,
         "worst_trade": float(trades_pnl.min()) if len(trades_pnl) > 0 else 0,
     }
