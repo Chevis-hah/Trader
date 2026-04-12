@@ -1,21 +1,24 @@
 """
-回测引擎 — 趋势跟踪 + 网格交易 双策略组合回测
+回测引擎 v2 — 政体自适应趋势策略（Regime-Adaptive Trend Following）
+
+核心改动（vs v1）：
+  1. 使用 FeatureEngine 计算 241 个特征（和实盘完全一致）
+  2. 使用 RegimeAdaptiveStrategy 做信号决策（和实盘完全一致）
+  3. 支持 regime 统计、月度归因、与 Buy&Hold 对比
 
 用法:
-    python backtest_runner.py                      # 默认参数回测
-    python backtest_runner.py --capital 5000        # 5000U 本金
-    python backtest_runner.py --start 2025-01-01    # 指定起始日期
-    python backtest_runner.py --snapshot result.txt  # 指定输出文件
-
-输出:
-    1. 控制台实时进度
-    2. 快照文件（含完整过程数据，可喂给 Claude 分析）
+    python backtest_runner.py                          # 默认全量回测
+    python backtest_runner.py --capital 5000            # 5000U 本金
+    python backtest_runner.py --start 2025-01-01        # 指定起始日期
+    python backtest_runner.py --snapshot result.txt     # 指定输出文件
+    python backtest_runner.py --no-regime               # 关闭 regime 过滤（对照组）
 """
+
 import argparse
 import sqlite3
 import time
-import json
 import sys
+import warnings
 from pathlib import Path
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
@@ -23,105 +26,78 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-# 策略
-from alpha.trend_following import TrendFollowingStrategy, TrendPosition, TrendSignal
-from alpha.grid_strategy import GridTradingStrategy, GridState
+from data.features import FeatureEngine
+from alpha.regime_strategy import (
+    RegimeAdaptiveStrategy, RegimeStrategyConfig,
+    classify_regime, add_regime_column,
+    REGIME_BULL_TREND, REGIME_BULL_WEAK, REGIME_RANGE,
+    REGIME_BEAR_WEAK, REGIME_BEAR_TREND,
+)
+from utils.logger import get_logger
 
-# =================================================================
-# 回测核心
-# =================================================================
+logger = get_logger("backtest_v2")
 
-@dataclass
-class Trade:
-    """单笔交易记录"""
-    symbol: str
-    strategy: str        # "trend" / "grid"
-    side: str            # BUY / SELL
-    entry_price: float = 0.0
-    exit_price: float = 0.0
-    quantity: float = 0.0
-    entry_time: str = ""
-    exit_time: str = ""
-    pnl: float = 0.0
-    pnl_pct: float = 0.0
-    holding_bars: int = 0
-    exit_reason: str = ""
+warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
+
+# ─────────────────────────────────────────────────────────────
+# 常量
+# ─────────────────────────────────────────────────────────────
+SYMBOLS = ["BTCUSDT", "ETHUSDT"]
 
 
-@dataclass
-class Snapshot:
-    """某一时刻的状态快照（用于过程监控）"""
-    timestamp: str = ""
-    bar_index: int = 0
-    close_btc: float = 0.0
-    close_eth: float = 0.0
-    equity: float = 0.0
-    cash: float = 0.0
-    trend_exposure: float = 0.0
-    grid_exposure: float = 0.0
-    total_exposure_pct: float = 0.0
-    drawdown_pct: float = 0.0
-    trend_pnl_cum: float = 0.0
-    grid_pnl_cum: float = 0.0
-    total_trades: int = 0
-    win_rate: float = 0.0
-    sharpe_rolling: float = 0.0
+def ts_str(ms_or_val) -> str:
+    """毫秒时间戳 → 可读字符串"""
+    try:
+        if isinstance(ms_or_val, (int, float, np.integer, np.floating)):
+            return datetime.utcfromtimestamp(int(ms_or_val) / 1000).strftime("%Y-%m-%d %H:%M")
+        return str(ms_or_val)
+    except Exception:
+        return str(ms_or_val)
 
 
-class BacktestEngine:
+# ─────────────────────────────────────────────────────────────
+# 回测引擎
+# ─────────────────────────────────────────────────────────────
+
+class BacktestEngineV2:
     """
-    双策略组合回测引擎
+    政体自适应回测引擎
 
-    策略分配：
-      - 趋势跟踪：60% 资金上限（4h 级别，BTC+ETH）
-      - 网格交易：40% 资金上限（1h 级别，BTC+ETH）
+    关键设计：
+      - 使用 FeatureEngine.compute_all() 计算特征（和实盘 _process_symbol 一致）
+      - 使用 RegimeAdaptiveStrategy 做 should_enter / check_exit / calc_position
+      - 回测循环复用 cmd_validate_strategy 的逻辑，确保策略一致性
     """
 
     def __init__(self, db_path: str, initial_capital: float = 10000.0,
-                 start_date: str = None, end_date: str = None):
+                 start_date: str = None, end_date: str = None,
+                 cfg: RegimeStrategyConfig = None,
+                 enable_regime: bool = True):
         self.db_path = db_path
         self.initial_capital = initial_capital
-        self.cash = initial_capital
         self.start_date = start_date
         self.end_date = end_date
+        self.enable_regime = enable_regime
 
-        # 策略实例
-        self.trend_strategy = TrendFollowingStrategy(
-            fast_period=20, slow_period=60,
-            atr_period=14, atr_filter_period=60,
-            atr_risk_mult=2.0, risk_per_trade=0.02,
-            trailing_atr_mult=2.5)
+        self.cfg = cfg or RegimeStrategyConfig()
+        self.strategy = RegimeAdaptiveStrategy(self.cfg)
+        self.feature_engine = FeatureEngine()
 
-        self.grid_strategy = GridTradingStrategy(
-            n_grids=5, grid_atr_mult=0.5,
-            qty_per_grid_pct=0.04, max_total_pct=0.40,
-            stop_loss_pct=0.05, adx_threshold=25.0)
-
-        # 持仓
-        self.trend_positions: dict[str, TrendPosition] = {}  # symbol -> position
-        self.grid_states: dict[str, GridState] = {}           # symbol -> state
-
-        # 记录
-        self.trades: list[Trade] = []
-        self.snapshots: list[Snapshot] = []
+        # 结果
+        self.all_trades: list[dict] = []
         self.equity_curve: list[float] = []
-        self.returns: list[float] = []
-        self.peak_equity = initial_capital
+        self.regime_log: list[dict] = []
 
-        # 过程统计
-        self.trend_pnl_cum = 0.0
-        self.grid_pnl_cum = 0.0
-        self.symbols = ["BTCUSDT", "ETHUSDT"]
-
-    # =============================================================
+    # ─────────────────────────────────────────────────────────
     # 数据加载
-    # =============================================================
-    def _load_data(self, symbol: str, interval: str) -> pd.DataFrame:
+    # ─────────────────────────────────────────────────────────
+
+    def _load_klines(self, symbol: str, interval: str) -> pd.DataFrame:
         """从 SQLite 加载 K 线数据"""
         conn = sqlite3.connect(self.db_path)
 
         conditions = ["symbol=?", "interval=?"]
-        params = [symbol, interval]
+        params: list = [symbol, interval]
 
         if self.start_date:
             start_ms = int(datetime.strptime(self.start_date, "%Y-%m-%d")
@@ -140,289 +116,389 @@ class BacktestEngine:
         conn.close()
 
         if df.empty:
-            print(f"  ⚠️  {symbol}/{interval} 无数据")
+            logger.warning(f"  ⚠️  {symbol}/{interval} 无数据")
         else:
             start = datetime.utcfromtimestamp(df["open_time"].iloc[0] / 1000)
             end = datetime.utcfromtimestamp(df["open_time"].iloc[-1] / 1000)
-            print(f"  ✅ {symbol}/{interval}: {len(df)} 条 | {start.date()} ~ {end.date()}")
-
+            logger.info(f"  ✅ {symbol}/{interval}: {len(df)} 条 | "
+                        f"{start.date()} ~ {end.date()}")
         return df
 
-    # =============================================================
-    # 趋势回测
-    # =============================================================
-    def _backtest_trend(self, dfs_4h: dict[str, pd.DataFrame]):
-        """趋势跟踪策略回测"""
-        print("\n📈 趋势跟踪策略回测（4h 级别）")
-        print("-" * 50)
+    # ─────────────────────────────────────────────────────────
+    # 特征计算（和实盘 _process_symbol 完全一致）
+    # ─────────────────────────────────────────────────────────
 
-        for symbol in self.symbols:
-            df = dfs_4h.get(symbol)
-            if df is None or len(df) < 100:
-                print(f"  {symbol}: 数据不足，跳过")
+    def _prepare_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        用 FeatureEngine 计算特征 → 添加 regime 列
+
+        这和 main.py 中实盘/模拟交易的 _process_symbol 使用相同的
+        FeatureEngine.compute_all() 管线，保证特征一致。
+        """
+        features = self.feature_engine.compute_all(df)
+        if features.empty:
+            return pd.DataFrame()
+
+        # 添加原始 OHLCV 列（特征表可能丢失部分）
+        for col in ["open", "high", "low", "volume", "open_time"]:
+            if col in df.columns and col not in features.columns:
+                features[col] = df[col].values[:len(features)]
+
+        # 添加 regime 标签
+        if self.enable_regime:
+            features = add_regime_column(features)
+        else:
+            features["regime"] = REGIME_BULL_TREND  # 对照组：始终认为是牛市
+
+        return features
+
+    # ─────────────────────────────────────────────────────────
+    # 单标的回测循环
+    # ─────────────────────────────────────────────────────────
+
+    def _backtest_symbol(self, symbol: str, features: pd.DataFrame,
+                         capital: float) -> tuple[float, list[dict]]:
+        """
+        对单个标的执行回测
+
+        返回: (final_cash, trades_list)
+
+        *** 核心逻辑与 main.py cmd_validate_strategy 完全一致 ***
+        """
+        cfg = self.cfg
+        strategy = self.strategy
+        cash = capital
+        position = None
+        trades = []
+
+        n = len(features)
+        if n < 100:
+            logger.warning(f"  {symbol}: 特征数据不足 ({n} 行)，跳过")
+            return cash, trades
+
+        for idx in range(1, n):
+            row = features.iloc[idx]
+            prev_row = features.iloc[idx - 1]
+
+            close = row.get("close", 0)
+            high = row.get("high", close)
+            ts = ts_str(row.get("open_time", 0))
+            regime = row.get("regime", REGIME_RANGE)
+
+            if pd.isna(close) or close <= 0:
                 continue
 
-            # 计算指标
-            df = self.trend_strategy.compute_indicators(df)
-            position = TrendPosition(symbol=symbol)
-            entry_bar = 0
+            # 记录 regime 分布（用于统计报告）
+            self.regime_log.append({
+                "symbol": symbol, "time": ts, "regime": regime,
+                "close": close,
+            })
 
-            for i in range(1, len(df)):
-                row = df.iloc[i]
-                prev = df.iloc[i - 1]
+            # ════════════════════════════════════════════════
+            # 持仓中 → 检查出场
+            # ════════════════════════════════════════════════
+            if position is not None:
+                bar_count = idx - position["entry_bar"]
 
-                if pd.isna(row.get("atr", np.nan)):
-                    continue
+                # 更新最高价
+                position["highest_since_entry"] = max(
+                    position["highest_since_entry"], high)
 
-                equity = self._calc_equity(dfs_4h, i)
-                signal = self.trend_strategy.generate_signal(
-                    row, prev, position if position.direction != "FLAT" else None, equity)
+                # 减仓检查
+                if strategy.check_partial_exit(row, position):
+                    sell_qty = position["original_qty"] * cfg.partial_exit_pct
+                    if sell_qty > 0 and sell_qty < position["qty"]:
+                        sell_price = close * (1 - cfg.slippage_pct)
+                        proceeds = sell_qty * sell_price * (1 - cfg.commission_pct)
+                        cash += proceeds
+                        position["qty"] -= sell_qty
+                        position["partial_done"] = True
 
-                ts = datetime.utcfromtimestamp(row["open_time"] / 1000).strftime("%Y-%m-%d %H:%M")
+                # 出场检查
+                should_exit, reason = strategy.check_exit(row, position, bar_count)
+                if should_exit:
+                    exit_price = close * (1 - cfg.slippage_pct)
+                    proceeds = position["qty"] * exit_price * (1 - cfg.commission_pct)
+                    cost_basis = position["qty"] * position["entry_price"] * \
+                                 (1 + cfg.commission_pct)
+                    pnl = proceeds - cost_basis
+                    pnl_pct = exit_price / position["entry_price"] - 1
+                    cash += proceeds
 
-                # 开仓
-                if signal.direction == "LONG" and position.direction == "FLAT":
-                    qty_value = equity * signal.position_size_pct
-                    qty = qty_value / row["close"]
-
-                    # 检查现金够不够
-                    cost = qty * row["close"]
-                    if cost > self.cash * 0.6:  # 趋势策略最多用 60% 资金
-                        cost = self.cash * 0.6
-                        qty = cost / row["close"]
-
-                    if cost < 10:
-                        continue
-
-                    self.cash -= cost
-                    position = TrendPosition(
-                        symbol=symbol, direction="LONG",
-                        entry_price=row["close"], entry_time=row["open_time"],
-                        quantity=qty, stop_loss=signal.stop_loss,
-                        highest_since_entry=row["close"],
-                        trailing_stop=signal.stop_loss,
-                        atr_at_entry=row["atr"])
-                    entry_bar = i
-
-                # 平仓
-                elif signal.direction == "CLOSE_LONG" and position.direction == "LONG":
-                    exit_price = row["close"]
-                    pnl = position.quantity * (exit_price - position.entry_price)
-                    pnl_pct = (exit_price - position.entry_price) / position.entry_price
-
-                    self.cash += position.quantity * exit_price
-                    self.trend_pnl_cum += pnl
-
-                    entry_ts = datetime.utcfromtimestamp(
-                        position.entry_time / 1000).strftime("%Y-%m-%d %H:%M")
-
-                    trade = Trade(
-                        symbol=symbol, strategy="trend", side="LONG",
-                        entry_price=position.entry_price, exit_price=exit_price,
-                        quantity=position.quantity,
-                        entry_time=entry_ts, exit_time=ts,
-                        pnl=pnl, pnl_pct=pnl_pct,
-                        holding_bars=i - entry_bar,
-                        exit_reason="trailing_stop" if exit_price <= position.trailing_stop else "ma_cross")
-                    self.trades.append(trade)
+                    trades.append({
+                        "symbol": symbol,
+                        "side": "LONG",
+                        "entry_price": round(position["entry_price"], 2),
+                        "exit_price": round(exit_price, 2),
+                        "quantity": position["original_qty"],
+                        "pnl": round(pnl, 2),
+                        "pnl_pct": pnl_pct,
+                        "entry_time": position["entry_time"],
+                        "exit_time": ts,
+                        "holding_bars": bar_count,
+                        "exit_reason": reason,
+                        "regime_at_entry": position["regime"],
+                        "regime_at_exit": regime,
+                    })
 
                     icon = "🟢" if pnl > 0 else "🔴"
-                    print(f"  {icon} {symbol} TREND | {entry_ts} → {ts} | "
-                          f"入={position.entry_price:.1f} 出={exit_price:.1f} | "
-                          f"PnL={pnl:+.2f} ({pnl_pct:+.1%}) | "
-                          f"持仓={i - entry_bar}bars | {trade.exit_reason}")
+                    logger.info(
+                        f"  {icon} {symbol} | {position['entry_time']} → {ts} | "
+                        f"入={position['entry_price']:.1f} 出={exit_price:.1f} | "
+                        f"PnL={pnl:+.2f} ({pnl_pct:+.1%}) | "
+                        f"{bar_count}bars | {reason} | {regime}")
 
-                    position = TrendPosition(symbol=symbol)
+                    position = None
 
-            # 回测结束时如果还有持仓，按最后价格平仓
-            if position.direction == "LONG":
-                last_price = df["close"].iloc[-1]
-                pnl = position.quantity * (last_price - position.entry_price)
-                self.cash += position.quantity * last_price
-                self.trend_pnl_cum += pnl
-                self.trades.append(Trade(
-                    symbol=symbol, strategy="trend", side="LONG",
-                    entry_price=position.entry_price, exit_price=last_price,
-                    quantity=position.quantity, pnl=pnl,
-                    pnl_pct=(last_price - position.entry_price) / position.entry_price,
-                    exit_reason="backtest_end"))
-
-    # =============================================================
-    # 网格回测
-    # =============================================================
-    def _backtest_grid(self, dfs_1h: dict[str, pd.DataFrame]):
-        """网格交易策略回测"""
-        print("\n📊 网格交易策略回测（1h 级别）")
-        print("-" * 50)
-
-        for symbol in self.symbols:
-            df = dfs_1h.get(symbol)
-            if df is None or len(df) < 100:
-                print(f"  {symbol}: 数据不足，跳过")
-                continue
-
-            df = self.grid_strategy.compute_indicators(df)
-            state = GridState()
-            grid_trade_count = 0
-            grid_pnl = 0.0
-
-            for i in range(1, len(df)):
-                row = df.iloc[i]
-                if pd.isna(row.get("atr", np.nan)):
+            # ════════════════════════════════════════════════
+            # 无持仓 → 检查入场
+            # ════════════════════════════════════════════════
+            if position is None and strategy.should_enter(row, prev_row):
+                natr = row.get("natr_20", 0)
+                if pd.isna(natr) or natr <= 0:
                     continue
 
-                equity = self.cash  # 简化
-                ts = datetime.utcfromtimestamp(row["open_time"] / 1000).strftime("%Y-%m-%d %H:%M")
+                entry_price = close * (1 + cfg.slippage_pct)
+                qty, stop_loss = strategy.calc_position(
+                    cash, entry_price, natr, regime)
 
-                # 如果网格不活跃，检查是否该建立新网格
-                if not state.active:
-                    if self.grid_strategy.should_activate(row):
-                        grid_capital = min(self.cash * 0.4, self.cash)  # 网格最多 40%
-                        if grid_capital >= 50:
-                            state = self.grid_strategy.create_grid(
-                                row["close"], row["atr"], grid_capital, row["open_time"])
+                if qty > 0:
+                    cost = qty * entry_price * (1 + cfg.commission_pct)
+                    if cost <= cash:
+                        cash -= cost
+                        atr_abs = natr * entry_price
+                        position = {
+                            "qty": qty,
+                            "original_qty": qty,
+                            "entry_price": entry_price,
+                            "stop_loss": stop_loss,
+                            "highest_since_entry": high,
+                            "atr_at_entry": atr_abs,
+                            "entry_bar": idx,
+                            "entry_time": ts,
+                            "regime": regime,
+                            "partial_done": False,
+                        }
+                        logger.info(
+                            f"  🔵 {symbol} | {ts} | 开仓 @ {entry_price:.1f} | "
+                            f"qty={qty:.6f} | {qty * entry_price:.1f} USDT | "
+                            f"止损={stop_loss:.1f} | {regime}")
 
-                # 处理当前 bar
-                if state.active:
-                    actions = self.grid_strategy.process_bar(row, state, equity)
-                    for act in actions:
-                        if act["action"] == "GRID_BUY":
-                            self.cash -= act["price"] * act["qty"]
-                            grid_trade_count += 1
-                        elif act["action"] == "GRID_SELL":
-                            self.cash += act["price"] * act["qty"]
-                            grid_pnl += act["pnl"]
-                            self.grid_pnl_cum += act["pnl"]
-                            grid_trade_count += 1
+            # 权益曲线快照（每根 bar 都记录）
+            equity = cash
+            if position is not None:
+                equity += position["qty"] * close
+            self.equity_curve.append(equity)
 
-                            icon = "🟢" if act["pnl"] > 0 else "🔴"
-                            print(f"  {icon} {symbol} GRID  | {ts} | "
-                                  f"卖出@{act['price']:.1f} | PnL={act['pnl']:+.2f}")
+        # 回测结束：强制平仓
+        if position is not None:
+            last_row = features.iloc[-1]
+            last_close = last_row.get("close", 0)
+            exit_price = last_close * (1 - cfg.slippage_pct)
+            bar_count = n - 1 - position["entry_bar"]
+            proceeds = position["qty"] * exit_price * (1 - cfg.commission_pct)
+            cost_basis = position["qty"] * position["entry_price"] * \
+                         (1 + cfg.commission_pct)
+            pnl = proceeds - cost_basis
+            pnl_pct = exit_price / position["entry_price"] - 1
+            cash += proceeds
 
-                        elif act["action"] == "GRID_STOP_LOSS":
-                            self.cash += act["price"] * act["qty"]
-                            grid_pnl += act["pnl"]
-                            self.grid_pnl_cum += act["pnl"]
-                            print(f"  🔴 {symbol} GRID STOP | {ts} | PnL={act['pnl']:+.2f}")
+            trades.append({
+                "symbol": symbol,
+                "side": "LONG",
+                "entry_price": round(position["entry_price"], 2),
+                "exit_price": round(exit_price, 2),
+                "quantity": position["original_qty"],
+                "pnl": round(pnl, 2),
+                "pnl_pct": pnl_pct,
+                "entry_time": position["entry_time"],
+                "exit_time": ts_str(last_row.get("open_time", 0)),
+                "holding_bars": bar_count,
+                "exit_reason": "backtest_end",
+                "regime_at_entry": position["regime"],
+                "regime_at_exit": last_row.get("regime", REGIME_RANGE),
+            })
+            position = None
 
-                    # 所有网格都被填充了，重置
-                    all_filled = all(l.filled for l in state.levels)
-                    if all_filled or not state.active:
-                        if state.open_qty > 0:
-                            # 按收盘价平仓剩余持仓
-                            close_pnl = state.open_qty * (row["close"] - state.avg_cost)
-                            self.cash += state.open_qty * row["close"]
-                            grid_pnl += close_pnl
-                            self.grid_pnl_cum += close_pnl
-                        state = GridState()
+        return cash, trades
 
-            # 回测结束，平掉网格持仓
-            if state.active and state.open_qty > 0:
-                last_price = df["close"].iloc[-1]
-                close_pnl = state.open_qty * (last_price - state.avg_cost)
-                self.cash += state.open_qty * last_price
-                self.grid_pnl_cum += close_pnl
+    # ─────────────────────────────────────────────────────────
+    # Buy & Hold 基准
+    # ─────────────────────────────────────────────────────────
 
-            print(f"  {symbol} 网格统计: {grid_trade_count} 笔交易 | 累计PnL={grid_pnl:+.2f}")
+    def _calc_buy_hold(self, features_dict: dict[str, pd.DataFrame]) -> float:
+        """计算等权 Buy & Hold 收益率"""
+        returns = []
+        for symbol, features in features_dict.items():
+            if len(features) < 2:
+                continue
+            first_close = features["close"].iloc[0]
+            last_close = features["close"].iloc[-1]
+            if first_close > 0:
+                returns.append(last_close / first_close - 1)
+        if not returns:
+            return 0.0
+        return sum(returns) / len(returns)
 
-    # =============================================================
-    # 辅助
-    # =============================================================
-    def _calc_equity(self, dfs: dict, bar_idx: int) -> float:
-        """计算当前权益（简化）"""
-        return self.cash + sum(
-            pos.quantity * dfs[sym]["close"].iloc[min(bar_idx, len(dfs[sym])-1)]
-            for sym, pos in self.trend_positions.items()
-            if pos.direction != "FLAT" and sym in dfs)
-
-    # =============================================================
+    # ─────────────────────────────────────────────────────────
     # 主入口
-    # =============================================================
+    # ─────────────────────────────────────────────────────────
+
     def run(self) -> dict:
-        """执行完整回测"""
-        print("=" * 60)
-        print("  量化回测引擎 v1.0 — 趋势跟踪 + 网格交易")
-        print("=" * 60)
-        print(f"  本金: {self.initial_capital:.0f} USDT")
-        print(f"  标的: {', '.join(self.symbols)}")
-        print(f"  日期: {self.start_date or '全部'} ~ {self.end_date or '全部'}")
+        """执行完整回测，返回报告字典"""
+        mode_str = "Regime-Adaptive" if self.enable_regime else "No-Regime (对照组)"
+        print("=" * 65)
+        print(f"  回测引擎 v2 — {mode_str}")
+        print("=" * 65)
+        print(f"  本金:    {self.initial_capital:.0f} USDT")
+        print(f"  标的:    {', '.join(SYMBOLS)}")
+        print(f"  日期:    {self.start_date or '全部'} ~ {self.end_date or '全部'}")
+        print(f"  Regime:  {'启用' if self.enable_regime else '关闭'}")
+        print(f"  手续费:  {self.cfg.commission_pct * 100:.2f}%")
+        print(f"  滑点:    {self.cfg.slippage_pct * 100:.3f}%")
         print()
 
-        # 加载数据
-        print("📂 加载数据...")
-        dfs_4h = {}
-        dfs_1h = {}
-        for sym in self.symbols:
-            dfs_4h[sym] = self._load_data(sym, "4h")
-            dfs_1h[sym] = self._load_data(sym, "1h")
+        # ── 加载数据 ──
+        print("📂 加载 1h K 线数据...")
+        klines = {}
+        for symbol in SYMBOLS:
+            klines[symbol] = self._load_klines(symbol, "1h")
 
-        # 检查数据
-        has_4h = any(len(df) > 100 for df in dfs_4h.values())
-        has_1h = any(len(df) > 100 for df in dfs_1h.values())
+        # ── 计算特征 ──
+        print("\n🔧 计算特征 + Regime 标签...")
+        features_dict: dict[str, pd.DataFrame] = {}
+        for symbol in SYMBOLS:
+            df = klines[symbol]
+            if len(df) < 500:
+                print(f"  ⚠️  {symbol} 数据不足 ({len(df)} 条)，跳过")
+                continue
+            features = self._prepare_features(df)
+            if not features.empty:
+                features_dict[symbol] = features
+                regime_counts = features["regime"].value_counts()
+                print(f"  {symbol}: {len(features)} 行特征 | "
+                      f"regime 分布: {dict(regime_counts)}")
 
-        if not has_4h and not has_1h:
-            print("\n❌ 无足够数据进行回测！请先运行 python main.py --sync-data")
+        if not features_dict:
+            print("\n❌ 无足够数据进行回测！")
             return {}
 
+        # ── 运行回测 ──
         t0 = time.time()
+        print("\n📈 开始回测...")
+        print("-" * 65)
 
-        # 运行趋势回测
-        if has_4h:
-            self._backtest_trend(dfs_4h)
+        # 每个标的分配等额资金
+        per_symbol_capital = self.initial_capital / len(features_dict)
+        total_cash = 0.0
 
-        # 运行网格回测
-        if has_1h:
-            self._backtest_grid(dfs_1h)
+        for symbol, features in features_dict.items():
+            print(f"\n  ── {symbol} ({len(features)} bars) ──")
+            cash, trades = self._backtest_symbol(
+                symbol, features, per_symbol_capital)
+            total_cash += cash
+            self.all_trades.extend(trades)
 
         elapsed = time.time() - t0
 
-        # 汇总
-        report = self._generate_report(elapsed)
+        # ── Buy & Hold 基准 ──
+        buy_hold_ret = self._calc_buy_hold(features_dict)
+
+        # ── 生成报告 ──
+        report = self._generate_report(total_cash, buy_hold_ret, elapsed)
         return report
 
-    # =============================================================
+    # ─────────────────────────────────────────────────────────
     # 报告生成
-    # =============================================================
-    def _generate_report(self, elapsed: float) -> dict:
-        """生成详细的回测报告"""
-        final_equity = self.cash
-        total_return = (final_equity - self.initial_capital) / self.initial_capital
+    # ─────────────────────────────────────────────────────────
 
-        # 交易统计
-        trend_trades = [t for t in self.trades if t.strategy == "trend"]
-        grid_trades = [t for t in self.trades if t.strategy == "grid"]
+    def _generate_report(self, final_cash: float,
+                         buy_hold_ret: float, elapsed: float) -> dict:
+        """生成完整回测报告"""
+        total_return = (final_cash - self.initial_capital) / self.initial_capital
+        trades = self.all_trades
 
-        all_pnl = [t.pnl for t in self.trades]
+        all_pnl = [t["pnl"] for t in trades]
         wins = [p for p in all_pnl if p > 0]
         losses = [p for p in all_pnl if p < 0]
 
         win_rate = len(wins) / len(all_pnl) if all_pnl else 0
         avg_win = np.mean(wins) if wins else 0
         avg_loss = np.mean(losses) if losses else 0
-        profit_factor = sum(wins) / abs(sum(losses)) if losses else float("inf")
+        profit_factor = sum(wins) / abs(sum(losses)) if losses else (
+            float("inf") if wins else 0)
         expectancy = np.mean(all_pnl) if all_pnl else 0
 
-        # 趋势策略单独统计
-        trend_pnls = [t.pnl for t in trend_trades]
-        trend_wins = [p for p in trend_pnls if p > 0]
-        trend_losses = [p for p in trend_pnls if p < 0]
-        trend_win_rate = len(trend_wins) / len(trend_pnls) if trend_pnls else 0
-        trend_avg_hold = np.mean([t.holding_bars for t in trend_trades]) if trend_trades else 0
+        # 权益曲线指标
+        eq = np.array(self.equity_curve) if self.equity_curve else np.array([self.initial_capital])
+        peak = np.maximum.accumulate(eq)
+        dd = (peak - eq) / np.clip(peak, 1e-10, None)
+        max_dd = float(dd.max()) if len(dd) > 0 else 0
+
+        # 夏普（简化：假设 1h bar）
+        if len(eq) > 2:
+            rets = np.diff(eq) / eq[:-1]
+            rets = rets[np.isfinite(rets)]
+            if len(rets) > 1 and rets.std() > 0:
+                sharpe = float(rets.mean() / rets.std() * np.sqrt(8766))
+            else:
+                sharpe = 0.0
+        else:
+            sharpe = 0.0
+
+        # 按 regime 分组统计
+        regime_stats = {}
+        for t in trades:
+            r = t.get("regime_at_entry", "UNKNOWN")
+            if r not in regime_stats:
+                regime_stats[r] = {"trades": 0, "wins": 0, "pnl": 0.0}
+            regime_stats[r]["trades"] += 1
+            regime_stats[r]["pnl"] += t["pnl"]
+            if t["pnl"] > 0:
+                regime_stats[r]["wins"] += 1
+
+        # 按标的分组
+        symbol_stats = {}
+        for t in trades:
+            s = t["symbol"]
+            if s not in symbol_stats:
+                symbol_stats[s] = {"trades": 0, "wins": 0, "pnl": 0.0}
+            symbol_stats[s]["trades"] += 1
+            symbol_stats[s]["pnl"] += t["pnl"]
+            if t["pnl"] > 0:
+                symbol_stats[s]["wins"] += 1
+
+        # 月度 PnL
+        monthly_pnl = {}
+        for t in trades:
+            if t["exit_time"]:
+                month = t["exit_time"][:7]
+                monthly_pnl[month] = monthly_pnl.get(month, 0) + t["pnl"]
+
+        # 退出原因统计
+        exit_reasons = {}
+        for t in trades:
+            r = t.get("exit_reason", "unknown")
+            if r not in exit_reasons:
+                exit_reasons[r] = {"count": 0, "pnl": 0.0}
+            exit_reasons[r]["count"] += 1
+            exit_reasons[r]["pnl"] += t["pnl"]
 
         report = {
             "summary": {
                 "initial_capital": self.initial_capital,
-                "final_equity": round(final_equity, 2),
+                "final_equity": round(final_cash, 2),
                 "total_return_pct": round(total_return * 100, 2),
-                "total_pnl": round(final_equity - self.initial_capital, 2),
-                "trend_pnl": round(self.trend_pnl_cum, 2),
-                "grid_pnl": round(self.grid_pnl_cum, 2),
+                "total_pnl": round(final_cash - self.initial_capital, 2),
+                "buy_hold_return_pct": round(buy_hold_ret * 100, 2),
+                "vs_buy_hold_pct": round((total_return - buy_hold_ret) * 100, 2),
+                "max_drawdown_pct": round(max_dd * 100, 2),
+                "sharpe_ratio": round(sharpe, 3),
+                "regime_filter": self.enable_regime,
                 "elapsed_seconds": round(elapsed, 1),
             },
             "trades_overview": {
-                "total_trades": len(self.trades),
-                "trend_trades": len(trend_trades),
-                "grid_trades": len(grid_trades),
+                "total_trades": len(trades),
                 "win_rate_pct": round(win_rate * 100, 1),
                 "avg_win": round(avg_win, 2),
                 "avg_loss": round(avg_loss, 2),
@@ -430,183 +506,188 @@ class BacktestEngine:
                 "expectancy": round(expectancy, 2),
                 "best_trade": round(max(all_pnl), 2) if all_pnl else 0,
                 "worst_trade": round(min(all_pnl), 2) if all_pnl else 0,
+                "avg_holding_bars": round(np.mean(
+                    [t["holding_bars"] for t in trades]), 1) if trades else 0,
             },
-            "trend_stats": {
-                "trades": len(trend_trades),
-                "win_rate_pct": round(trend_win_rate * 100, 1),
-                "total_pnl": round(self.trend_pnl_cum, 2),
-                "avg_holding_bars": round(trend_avg_hold, 1),
-                "avg_win": round(np.mean(trend_wins), 2) if trend_wins else 0,
-                "avg_loss": round(np.mean(trend_losses), 2) if trend_losses else 0,
+            "regime_stats": {
+                r: {
+                    "trades": s["trades"],
+                    "win_rate_pct": round(s["wins"] / s["trades"] * 100, 1) if s["trades"] else 0,
+                    "total_pnl": round(s["pnl"], 2),
+                }
+                for r, s in regime_stats.items()
             },
-            "grid_stats": {
-                "total_pnl": round(self.grid_pnl_cum, 2),
+            "symbol_stats": {
+                s: {
+                    "trades": d["trades"],
+                    "win_rate_pct": round(d["wins"] / d["trades"] * 100, 1) if d["trades"] else 0,
+                    "total_pnl": round(d["pnl"], 2),
+                }
+                for s, d in symbol_stats.items()
             },
-            "all_trades": [],
+            "exit_reasons": {
+                r: {"count": d["count"], "pnl": round(d["pnl"], 2)}
+                for r, d in exit_reasons.items()
+            },
+            "monthly_pnl": {
+                m: round(p, 2) for m, p in sorted(monthly_pnl.items())
+            },
+            "strategy_config": {
+                "commission_pct": self.cfg.commission_pct,
+                "slippage_pct": self.cfg.slippage_pct,
+                "risk_per_trade": self.cfg.risk_per_trade,
+                "risk_per_trade_weak": self.cfg.risk_per_trade_weak,
+                "trailing_atr_mult": self.cfg.trailing_atr_mult,
+                "take_profit_atr_mult": self.cfg.take_profit_atr_mult,
+                "stop_atr_mult": self.cfg.stop_atr_mult,
+                "max_holding_bars": self.cfg.max_holding_bars,
+                "rsi_low": self.cfg.rsi_low,
+                "rsi_high": self.cfg.rsi_high,
+                "adx_min": self.cfg.adx_min,
+            },
+            "all_trades": trades,
         }
 
-        # 详细交易列表
-        for t in self.trades:
-            report["all_trades"].append({
-                "symbol": t.symbol,
-                "strategy": t.strategy,
-                "side": t.side,
-                "entry": t.entry_price,
-                "exit": t.exit_price,
-                "qty": round(t.quantity, 6),
-                "pnl": round(t.pnl, 2),
-                "pnl_pct": f"{t.pnl_pct:+.2%}",
-                "entry_time": t.entry_time,
-                "exit_time": t.exit_time,
-                "bars": t.holding_bars,
-                "reason": t.exit_reason,
-            })
-
-        # 打印报告
         self._print_report(report)
         return report
 
     def _print_report(self, report: dict):
-        """打印格式化报告"""
+        """格式化打印报告到控制台"""
         s = report["summary"]
         t = report["trades_overview"]
-        ts = report["trend_stats"]
 
         icon = "🟢" if s["total_pnl"] > 0 else "🔴"
+        bh_icon = "✅" if s["vs_buy_hold_pct"] > 0 else "❌"
 
         print()
         print("=" * 65)
-        print("                    回 测 报 告")
+        print("                    回 测 报 告 v2")
         print("=" * 65)
-        print(f"  {icon} 总收益:        {s['total_pnl']:>+10.2f} USDT ({s['total_return_pct']:+.2f}%)")
-        print(f"     初始资金:       {s['initial_capital']:>10.0f} USDT")
-        print(f"     最终权益:       {s['final_equity']:>10.2f} USDT")
-        print(f"     趋势策略 PnL:   {s['trend_pnl']:>+10.2f} USDT")
-        print(f"     网格策略 PnL:   {s['grid_pnl']:>+10.2f} USDT")
+        print(f"  {icon} 策略收益:       {s['total_pnl']:>+10.2f} USDT "
+              f"({s['total_return_pct']:+.2f}%)")
+        print(f"     Buy & Hold:      {s['buy_hold_return_pct']:>+10.2f}%")
+        print(f"     vs Buy&Hold:     {s['vs_buy_hold_pct']:>+10.2f}%  {bh_icon}")
+        print(f"     最大回撤:        {s['max_drawdown_pct']:>10.2f}%")
+        print(f"     夏普比率:        {s['sharpe_ratio']:>10.3f}")
+        print(f"     Regime 过滤:     {'启用' if s['regime_filter'] else '关闭'}")
         print("-" * 65)
         print(f"  📊 交易统计:")
-        print(f"     总交易数:       {t['total_trades']:>10d}")
-        print(f"     趋势交易:       {t['trend_trades']:>10d}")
-        print(f"     网格交易:       {t['grid_trades']:>10d}")
-        print(f"     胜率:           {t['win_rate_pct']:>9.1f}%")
-        print(f"     平均盈利:       {t['avg_win']:>+10.2f}")
-        print(f"     平均亏损:       {t['avg_loss']:>+10.2f}")
-        print(f"     盈亏比:         {t['profit_factor']:>10.3f}")
-        print(f"     期望收益:       {t['expectancy']:>+10.2f}")
-        print(f"     最大单笔盈利:   {t['best_trade']:>+10.2f}")
-        print(f"     最大单笔亏损:   {t['worst_trade']:>+10.2f}")
-        print("-" * 65)
-        print(f"  📈 趋势策略详情:")
-        print(f"     交易次数:       {ts['trades']:>10d}")
-        print(f"     胜率:           {ts['win_rate_pct']:>9.1f}%")
-        print(f"     平均持仓:       {ts['avg_holding_bars']:>10.1f} bars (4h)")
+        print(f"     总交易数:        {t['total_trades']:>10d}")
+        print(f"     胜率:            {t['win_rate_pct']:>9.1f}%")
+        print(f"     平均盈利:        {t['avg_win']:>+10.2f}")
+        print(f"     平均亏损:        {t['avg_loss']:>+10.2f}")
+        print(f"     盈亏比:          {t['profit_factor']:>10.3f}")
+        print(f"     期望收益:        {t['expectancy']:>+10.2f}")
+        print(f"     平均持仓:        {t['avg_holding_bars']:>10.1f} bars (1h)")
+
+        # Regime 分组
+        rs = report.get("regime_stats", {})
+        if rs:
+            print("-" * 65)
+            print(f"  🏛  Regime 分组:")
+            for regime, data in sorted(rs.items()):
+                r_icon = "🟢" if data["total_pnl"] > 0 else "🔴"
+                print(f"     {r_icon} {regime:<15} | "
+                      f"{data['trades']:>3d} 笔 | "
+                      f"胜率={data['win_rate_pct']:>5.1f}% | "
+                      f"PnL={data['total_pnl']:>+10.2f}")
+
+        # 按标的分组
+        ss = report.get("symbol_stats", {})
+        if ss:
+            print("-" * 65)
+            print(f"  📈 标的分组:")
+            for sym, data in ss.items():
+                sym_icon = "🟢" if data["total_pnl"] > 0 else "🔴"
+                print(f"     {sym_icon} {sym:<10} | "
+                      f"{data['trades']:>3d} 笔 | "
+                      f"胜率={data['win_rate_pct']:>5.1f}% | "
+                      f"PnL={data['total_pnl']:>+10.2f}")
+
+        # 退出原因
+        er = report.get("exit_reasons", {})
+        if er:
+            print("-" * 65)
+            print(f"  🚪 退出原因:")
+            for reason, data in sorted(er.items(), key=lambda x: x[1]["count"],
+                                       reverse=True):
+                print(f"     {reason:<20} | {data['count']:>3d} 次 | "
+                      f"PnL={data['pnl']:>+10.2f}")
+
+        # 月度 PnL
+        mp = report.get("monthly_pnl", {})
+        if mp:
+            print("-" * 65)
+            print(f"  📅 月度 PnL:")
+            for month, pnl in mp.items():
+                m_icon = "🟢" if pnl > 0 else "🔴"
+                print(f"     {m_icon} {month}: {pnl:+.2f} USDT")
+
         print("=" * 65)
         print(f"  ⏱  耗时: {s['elapsed_seconds']:.1f}s")
 
 
-# =================================================================
+# ─────────────────────────────────────────────────────────────
 # 快照输出
-# =================================================================
+# ─────────────────────────────────────────────────────────────
 
 def write_snapshot(report: dict, output_path: str, db_path: str,
                    start_date: str, end_date: str):
-    """将回测结果写入快照文件（可直接喂给 Claude）"""
-
+    """将回测结果写入快照文件（可直接喂给 Claude 分析）"""
     lines = []
     lines.append("=" * 70)
-    lines.append("BACKTEST SNAPSHOT")
+    lines.append("BACKTEST SNAPSHOT v2 (Regime-Adaptive)")
     lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append(f"Database: {db_path}")
     lines.append(f"Period: {start_date or 'all'} ~ {end_date or 'all'}")
     lines.append("=" * 70)
 
     # 概要
-    lines.append("")
-    lines.append("=" * 70)
-    lines.append("SECTION: SUMMARY")
-    lines.append("=" * 70)
-    for k, v in report.get("summary", {}).items():
-        lines.append(f"  {k}: {v}")
+    for section_name in ["summary", "trades_overview", "regime_stats",
+                         "symbol_stats", "exit_reasons", "strategy_config"]:
+        lines.append("")
+        lines.append("=" * 70)
+        lines.append(f"SECTION: {section_name.upper()}")
+        lines.append("=" * 70)
+        data = report.get(section_name, {})
+        if isinstance(data, dict):
+            for k, v in data.items():
+                if isinstance(v, dict):
+                    lines.append(f"  [{k}]")
+                    for k2, v2 in v.items():
+                        lines.append(f"    {k2}: {v2}")
+                else:
+                    lines.append(f"  {k}: {v}")
 
-    # 交易统计
-    lines.append("")
-    lines.append("=" * 70)
-    lines.append("SECTION: TRADES_OVERVIEW")
-    lines.append("=" * 70)
-    for k, v in report.get("trades_overview", {}).items():
-        lines.append(f"  {k}: {v}")
-
-    # 趋势策略统计
-    lines.append("")
-    lines.append("=" * 70)
-    lines.append("SECTION: TREND_STATS")
-    lines.append("=" * 70)
-    for k, v in report.get("trend_stats", {}).items():
-        lines.append(f"  {k}: {v}")
-
-    # 网格策略统计
-    lines.append("")
-    lines.append("=" * 70)
-    lines.append("SECTION: GRID_STATS")
-    lines.append("=" * 70)
-    for k, v in report.get("grid_stats", {}).items():
-        lines.append(f"  {k}: {v}")
-
-    # 每笔交易详情
-    lines.append("")
-    lines.append("=" * 70)
-    lines.append("SECTION: ALL_TRADES")
-    lines.append("=" * 70)
-    lines.append(f"{'#':>4} | {'Symbol':<10} | {'Strategy':<8} | {'Side':<6} | "
-                 f"{'Entry':>10} | {'Exit':>10} | {'PnL':>10} | {'PnL%':>8} | "
-                 f"{'Bars':>5} | {'Reason':<16} | {'Entry Time':<16} | {'Exit Time':<16}")
-    lines.append("-" * 140)
-
-    for idx, t in enumerate(report.get("all_trades", []), 1):
-        lines.append(
-            f"{idx:>4} | {t['symbol']:<10} | {t['strategy']:<8} | {t['side']:<6} | "
-            f"{t['entry']:>10.2f} | {t['exit']:>10.2f} | {t['pnl']:>+10.2f} | "
-            f"{t['pnl_pct']:>8} | {t['bars']:>5} | {t['reason']:<16} | "
-            f"{t['entry_time']:<16} | {t['exit_time']:<16}")
-
-    # 月度收益分析（从交易中提取）
+    # 月度 PnL
     lines.append("")
     lines.append("=" * 70)
     lines.append("SECTION: MONTHLY_PNL")
     lines.append("=" * 70)
-
-    monthly = {}
-    for t in report.get("all_trades", []):
-        if t["exit_time"]:
-            month = t["exit_time"][:7]  # "2025-01"
-            monthly[month] = monthly.get(month, 0) + t["pnl"]
-
-    for month in sorted(monthly.keys()):
-        pnl = monthly[month]
+    for month, pnl in report.get("monthly_pnl", {}).items():
         icon = "+" if pnl > 0 else ""
         lines.append(f"  {month}: {icon}{pnl:.2f} USDT")
 
-    # 策略配置
+    # 交易明细
     lines.append("")
     lines.append("=" * 70)
-    lines.append("SECTION: STRATEGY_CONFIG")
+    lines.append("SECTION: ALL_TRADES")
     lines.append("=" * 70)
-    lines.append("  [Trend Following - 4h]")
-    lines.append("    fast_ema: 20")
-    lines.append("    slow_ema: 60")
-    lines.append("    atr_period: 14")
-    lines.append("    atr_filter_period: 60")
-    lines.append("    trailing_stop_mult: 2.5x ATR")
-    lines.append("    risk_per_trade: 2%")
-    lines.append("    max_exposure: 60%")
-    lines.append("")
-    lines.append("  [Grid Trading - 1h]")
-    lines.append("    grid_levels: 5 (each side)")
-    lines.append("    grid_spacing: 0.5x ATR")
-    lines.append("    qty_per_grid: 4% of capital")
-    lines.append("    stop_loss: 5%")
-    lines.append("    adx_threshold: 25 (only range-bound)")
-    lines.append("    max_exposure: 40%")
+    header = (f"{'#':>4} | {'Symbol':<10} | {'Side':<6} | "
+              f"{'Entry':>10} | {'Exit':>10} | {'PnL':>10} | {'PnL%':>8} | "
+              f"{'Bars':>5} | {'Reason':<16} | {'Regime':>12} | "
+              f"{'Entry Time':<16} | {'Exit Time':<16}")
+    lines.append(header)
+    lines.append("-" * 150)
+
+    for idx, t in enumerate(report.get("all_trades", []), 1):
+        lines.append(
+            f"{idx:>4} | {t['symbol']:<10} | {t['side']:<6} | "
+            f"{t['entry_price']:>10.2f} | {t['exit_price']:>10.2f} | "
+            f"{t['pnl']:>+10.2f} | {t['pnl_pct']:>+7.2%} | "
+            f"{t['holding_bars']:>5} | {t['exit_reason']:<16} | "
+            f"{t.get('regime_at_entry', '?'):>12} | "
+            f"{t['entry_time']:<16} | {t['exit_time']:<16}")
 
     lines.append("")
     lines.append("=" * 70)
@@ -614,7 +695,6 @@ def write_snapshot(report: dict, output_path: str, db_path: str,
     lines.append("=" * 70)
 
     content = "\n".join(lines)
-
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(content)
 
@@ -623,18 +703,36 @@ def write_snapshot(report: dict, output_path: str, db_path: str,
     print(f"   💡 将此文件上传给 Claude 即可分析回测结果")
 
 
-# =================================================================
+# ─────────────────────────────────────────────────────────────
 # CLI
-# =================================================================
+# ─────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="量化回测引擎 — 趋势跟踪 + 网格交易")
-    parser.add_argument("--db", type=str, default="data/quant.db", help="数据库路径")
-    parser.add_argument("--capital", type=float, default=10000.0, help="初始资金 (USDT)")
-    parser.add_argument("--start", type=str, default=None, help="起始日期 YYYY-MM-DD")
-    parser.add_argument("--end", type=str, default=None, help="结束日期 YYYY-MM-DD")
+    parser = argparse.ArgumentParser(
+        description="量化回测引擎 v2 — 政体自适应趋势策略")
+    parser.add_argument("--db", type=str, default="data/quant.db",
+                        help="数据库路径")
+    parser.add_argument("--capital", type=float, default=10000.0,
+                        help="初始资金 (USDT)")
+    parser.add_argument("--start", type=str, default=None,
+                        help="起始日期 YYYY-MM-DD")
+    parser.add_argument("--end", type=str, default=None,
+                        help="结束日期 YYYY-MM-DD")
     parser.add_argument("--snapshot", type=str, default="backtest_snapshot.txt",
                         help="快照输出路径")
+    parser.add_argument("--no-regime", action="store_true",
+                        help="关闭 regime 过滤（对照组，测试 regime 效果）")
+
+    # 可调策略参数
+    parser.add_argument("--risk", type=float, default=None,
+                        help="单笔风险比例（默认 0.03）")
+    parser.add_argument("--trail", type=float, default=None,
+                        help="移动止损 ATR 倍数（默认 2.5）")
+    parser.add_argument("--tp", type=float, default=None,
+                        help="止盈 ATR 倍数（默认 4.0）")
+    parser.add_argument("--max-bars", type=int, default=None,
+                        help="最大持仓 bars（默认 30）")
+
     args = parser.parse_args()
 
     # 检查数据库
@@ -644,17 +742,33 @@ def main():
         print("   请先运行: python main.py --sync-data")
         sys.exit(1)
 
+    # 构建配置
+    cfg = RegimeStrategyConfig()
+    if args.risk is not None:
+        cfg.risk_per_trade = args.risk
+        cfg.risk_per_trade_weak = args.risk / 2
+    if args.trail is not None:
+        cfg.trailing_atr_mult = args.trail
+    if args.tp is not None:
+        cfg.take_profit_atr_mult = args.tp
+    if args.max_bars is not None:
+        cfg.max_holding_bars = args.max_bars
+
     # 运行回测
-    engine = BacktestEngine(
+    engine = BacktestEngineV2(
         db_path=str(db_path),
         initial_capital=args.capital,
         start_date=args.start,
-        end_date=args.end)
+        end_date=args.end,
+        cfg=cfg,
+        enable_regime=not args.no_regime,
+    )
 
     report = engine.run()
 
     if report:
-        write_snapshot(report, args.snapshot, str(db_path), args.start, args.end)
+        write_snapshot(report, args.snapshot, str(db_path),
+                       args.start, args.end)
 
 
 if __name__ == "__main__":
