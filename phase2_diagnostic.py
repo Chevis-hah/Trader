@@ -54,6 +54,17 @@ def safe_json(obj):
     return obj
 
 
+def pick_interval_df(intervals: dict) -> pd.DataFrame | None:
+    """优先 4h，否则 1d；禁止对 DataFrame 使用 `or`（pandas 会报错）。"""
+    d4 = intervals.get("4h")
+    if d4 is not None and len(d4) > 0:
+        return d4
+    d1 = intervals.get("1d")
+    if d1 is not None and len(d1) > 0:
+        return d1
+    return None
+
+
 # ==================== 1. DB SCHEMA DISCOVERY ====================
 
 def discover_schema(db_path):
@@ -850,7 +861,7 @@ def check_500_feasibility(data_dict):
     """Check if strategies are feasible with 500 USDT capital"""
     result = {}
     for sym, intervals in data_dict.items():
-        df = intervals.get('4h') or intervals.get('1d')
+        df = pick_interval_df(intervals)
         if df is None or len(df) == 0:
             continue
         last_price = float(df['close'].iloc[-1])
@@ -939,7 +950,7 @@ def main():
     print("\n[4/9] Estimating trading costs...")
     report["costs"] = {}
     for sym in SYMBOLS:
-        df = data_dict[sym].get('4h') or data_dict[sym].get('1d')
+        df = pick_interval_df(data_dict[sym])
         try:
             report["costs"][sym] = estimate_costs(df, sym)
             if report["costs"][sym]:
