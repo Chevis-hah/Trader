@@ -119,9 +119,12 @@ class MLSignalFilter:
             klines = storage.get_klines(sym, "4h", limit=100000)
             if klines.empty:
                 continue
-            features = feat_engine.compute(klines)
+            features = feat_engine.compute_all(klines)
             if features.empty:
                 continue
+            if "open_time" not in features.columns:
+                features = features.copy()
+                features["open_time"] = klines["open_time"].to_numpy()
 
             if start:
                 ts = int(pd.Timestamp(start).timestamp() * 1000)

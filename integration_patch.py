@@ -28,7 +28,7 @@ logger = get_logger("integration")
 
 
 def cmd_diagnose(args):
-    """运行数据诊断"""
+    """运行数据诊断（权益 CSV / 汇总 JSON 写入 analysis/output/）"""
     from analysis.data_diagnostic import (
         generate_equity_curve,
         analyze_correlation,
@@ -36,18 +36,27 @@ def cmd_diagnose(args):
         analyze_slippage,
     )
 
+    out_dir = ROOT / "analysis" / "output"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     print("=" * 70)
     print("  📊 数据诊断模式")
     print("=" * 70)
+    print(f"  输出目录: {out_dir}")
+
+    summary: dict = {"strategies": {}, "start": args.start, "capital": args.capital}
 
     for strategy in ["triple_ema", "macd_momentum"]:
         print(f"\n{'─'*40}")
         print(f"  策略: {strategy}")
         print(f"{'─'*40}")
 
-        # 权益曲线
+        # 权益曲线 → CSV（TODO Phase 1 收集项）
         eq = generate_equity_curve(args.db, strategy, args.start, capital=args.capital)
         if not eq.empty:
+            csv_path = out_dir / f"equity_curve_{strategy}.csv"
+            eq.to_csv(csv_path, index=False)
+            print(f"  📄 权益曲线: {csv_path}")
             print(f"  最终权益: {eq['equity'].iloc[-1]:.2f}")
             print(f"  最大回撤: {eq['drawdown_pct'].max():.2f}%")
 
@@ -60,6 +69,7 @@ def cmd_diagnose(args):
                     for b, d in buckets.items():
                         if isinstance(d, dict):
                             print(f"    {b}: {d['trades']}笔 PnL={d['pnl']:+.2f}")
+        summary["strategies"][strategy] = {"regime": regime, "equity_rows": len(eq)}
 
     # 全局分析
     print(f"\n{'─'*40}")
@@ -69,10 +79,18 @@ def cmd_diagnose(args):
     corr = analyze_correlation(args.db, start_date=args.start)
     if "error" not in corr:
         print(f"  BTC/ETH 相关性: {corr['overall_correlation']}")
+    summary["correlation"] = corr
 
     slip = analyze_slippage(args.db)
+    summary["slippage"] = slip
     for sym, d in slip.items():
-        print(f"  {sym} 估计滑点: {d['estimated_slippage_bps']:.1f} bps")
+        print(f"  {sym} 估计滑点: {d['estimated_slippage_bps']:.1f} bps "
+              f"(假设 {d['current_assumption_bps']:.0f} bps)")
+
+    summary_path = out_dir / "phase1_diagnose_summary.json"
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, default=str)
+    print(f"\n  📄 诊断汇总: {summary_path}")
 
 
 def cmd_sensitivity(args):
@@ -92,6 +110,9 @@ def cmd_walkforward(args):
     """运行 Walk-Forward 验证"""
     from backtest_walkforward import WalkForwardEngine
 
+    out_dir = ROOT / "analysis" / "output"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     for strategy in ["triple_ema", "macd_momentum"]:
         print(f"\n{'='*70}")
         print(f"  Walk-Forward: {strategy}")
@@ -106,8 +127,8 @@ def cmd_walkforward(args):
         )
         summary = engine.run()
 
-        output = f"walkforward_{strategy}.json"
-        with open(output, "w") as f:
+        output = out_dir / f"walkforward_{strategy}.json"
+        with open(output, "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2, default=str)
         print(f"  📄 {output}")
 
@@ -193,6 +214,40 @@ def cmd_ml_train(args):
             print("\n  ✅ AUC >= 0.55, 可以启用 ML 过滤")
 
 
+def cmd_ml_backtest(args):
+    """Phase 4.2: 加载 ML 模型后对 OOS 区间回测（默认 macd_momentum）"""
+    from backtest_runner import BacktestEngine, write_snapshot
+    from alpha.ml_signal_filter import MLSignalFilter, patch_strategy_with_ml
+
+    model_path = ROOT / "models" / "ml_filter.pkl"
+    if not model_path.is_file():
+        print(f"❌ 未找到模型: {model_path}")
+        print("   请先运行: python integration_patch.py --mode ml_train ...")
+        return
+
+    out_dir = ROOT / "analysis" / "output"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ml = MLSignalFilter.load(str(model_path))
+    strategy = args.ml_strategy
+
+    print("=" * 70)
+    print(f"  🤖 ML 过滤回测 | {strategy} | start={args.start}")
+    print("=" * 70)
+
+    engine = BacktestEngine(
+        db_path=args.db,
+        strategy_name=strategy,
+        initial_capital=args.capital,
+        start_date=args.start,
+    )
+    patch_strategy_with_ml(engine.strategy, ml, threshold=args.ml_threshold)
+    report = engine.run()
+    if report:
+        snap = out_dir / f"backtest_{strategy}_ml_filtered_snapshot.txt"
+        write_snapshot(report, str(snap), args.db, args.start, None)
+        print(f"  📄 {snap}")
+
+
 def cmd_full(args):
     """全量运行"""
     print("=" * 70)
@@ -222,7 +277,7 @@ def main():
     parser = argparse.ArgumentParser(description="集成补丁 — 全模块运行器")
     parser.add_argument("--mode", type=str, default="diagnose",
                         choices=["diagnose", "sensitivity", "walkforward",
-                                 "enhanced", "ml_train", "full"])
+                                 "enhanced", "ml_train", "ml_backtest", "full"])
     parser.add_argument("--db", type=str, default="data/quant.db")
     parser.add_argument("--config", type=str, default=None)
     parser.add_argument("--strategy", type=str, default="triple_ema")
@@ -232,6 +287,10 @@ def main():
     parser.add_argument("--test-days", type=int, default=60)
     parser.add_argument("--ml-train-start", type=str, default="2024-01-01")
     parser.add_argument("--ml-train-end", type=str, default="2024-12-31")
+    parser.add_argument("--ml-threshold", type=float, default=0.55,
+                        help="ML 过滤回测时的概率阈值")
+    parser.add_argument("--ml-strategy", type=str, default="macd_momentum",
+                        help="ML 过滤回测使用的策略名")
     args = parser.parse_args()
 
     mode_map = {
@@ -240,6 +299,7 @@ def main():
         "walkforward": cmd_walkforward,
         "enhanced": cmd_enhanced,
         "ml_train": cmd_ml_train,
+        "ml_backtest": cmd_ml_backtest,
         "full": cmd_full,
     }
 

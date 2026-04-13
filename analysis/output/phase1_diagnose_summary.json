@@ -1,0 +1,149 @@
+{
+  "strategies": {
+    "triple_ema": {
+      "regime": {
+        "by_adx": {
+          "moderate(20-30)": {
+            "trades": 5,
+            "pnl": -97.49,
+            "wins": 2,
+            "win_rate": 40.0,
+            "avg_pnl": -19.5
+          },
+          "weak(<20)": {
+            "trades": 1,
+            "pnl": -75.16,
+            "wins": 0,
+            "win_rate": 0.0,
+            "avg_pnl": -75.16
+          },
+          "strong(>30)": {
+            "trades": 1,
+            "pnl": 1020.0,
+            "wins": 1,
+            "win_rate": 100.0,
+            "avg_pnl": 1020.0
+          }
+        },
+        "by_volatility": {
+          "low(<1.5%)": {
+            "trades": 5,
+            "pnl": 793.2,
+            "wins": 1,
+            "win_rate": 20.0,
+            "avg_pnl": 158.64
+          },
+          "medium(1.5-3%)": {
+            "trades": 2,
+            "pnl": 54.15,
+            "wins": 2,
+            "win_rate": 100.0,
+            "avg_pnl": 27.07
+          }
+        },
+        "by_symbol": {}
+      },
+      "equity_rows": 2799
+    },
+    "macd_momentum": {
+      "regime": {
+        "by_adx": {
+          "strong(>30)": {
+            "trades": 19,
+            "pnl": 463.42,
+            "wins": 11,
+            "win_rate": 57.9,
+            "avg_pnl": 24.39
+          },
+          "moderate(20-30)": {
+            "trades": 25,
+            "pnl": 139.47,
+            "wins": 7,
+            "win_rate": 28.0,
+            "avg_pnl": 5.58
+          },
+          "weak(<20)": {
+            "trades": 11,
+            "pnl": 171.42,
+            "wins": 5,
+            "win_rate": 45.5,
+            "avg_pnl": 15.58
+          }
+        },
+        "by_volatility": {
+          "low(<1.5%)": {
+            "trades": 34,
+            "pnl": 50.51,
+            "wins": 11,
+            "win_rate": 32.4,
+            "avg_pnl": 1.49
+          },
+          "medium(1.5-3%)": {
+            "trades": 20,
+            "pnl": 707.92,
+            "wins": 11,
+            "win_rate": 55.0,
+            "avg_pnl": 35.4
+          },
+          "high(>3%)": {
+            "trades": 1,
+            "pnl": 15.88,
+            "wins": 1,
+            "win_rate": 100.0,
+            "avg_pnl": 15.88
+          }
+        },
+        "by_symbol": {}
+      },
+      "equity_rows": 2799
+    }
+  },
+  "start": "2025-01-01",
+  "capital": 10000.0,
+  "correlation": {
+    "overall_correlation": 0.8269,
+    "n_bars": 2797,
+    "rolling_30_mean": 0.8174,
+    "rolling_30_min": 0.261,
+    "rolling_30_max": 0.9758,
+    "rolling_30_std": 0.1242,
+    "rolling_60_mean": 0.819,
+    "rolling_60_min": 0.4202,
+    "rolling_60_max": 0.9574,
+    "rolling_60_std": 0.1043,
+    "rolling_120_mean": 0.8196,
+    "rolling_120_min": 0.5619,
+    "rolling_120_max": 0.9446,
+    "rolling_120_std": 0.0892,
+    "rolling_240_mean": 0.8239,
+    "rolling_240_min": 0.6398,
+    "rolling_240_max": 0.9274,
+    "rolling_240_std": 0.0794
+  },
+  "slippage": {
+    "BTCUSDT": {
+      "median_spread_pct": 1.3925,
+      "p95_spread_pct": 4.3666,
+      "estimated_slippage_bps": 20.89,
+      "current_assumption_bps": 10.0,
+      "spread_by_volume_quantile": {
+        "Q1_low": 0.7404,
+        "Q2": 1.2664,
+        "Q3": 1.997,
+        "Q4_high": 2.3724
+      }
+    },
+    "ETHUSDT": {
+      "median_spread_pct": 1.7203,
+      "p95_spread_pct": 4.8152,
+      "estimated_slippage_bps": 25.81,
+      "current_assumption_bps": 10.0,
+      "spread_by_volume_quantile": {
+        "Q1_low": 0.9413,
+        "Q2": 1.505,
+        "Q3": 2.0357,
+        "Q4_high": 3.2431
+      }
+    }
+  }
+}

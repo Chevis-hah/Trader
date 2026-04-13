@@ -164,9 +164,12 @@ def analyze_by_regime(db_path: str, strategy_name: str,
             ts_ms = int(pd.Timestamp(start_date).timestamp() * 1000)
             klines = klines[klines["open_time"] >= ts_ms]
 
-        features = feat_engine.compute(klines)
+        features = feat_engine.compute_all(klines)
         if features.empty:
             continue
+        if "open_time" not in features.columns:
+            features = features.copy()
+            features["open_time"] = klines["open_time"].to_numpy()
 
         sym_trades = [t for t in trades if t.get("symbol") == sym]
         if not sym_trades:

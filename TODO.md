@@ -1,182 +1,124 @@
-# 🎯 执行 TODO — 按顺序操作
+# Phase 2 — 量化策略重构路线图
 
-## 前置: 文件部署
-
-```bash
-# 1. 将输出文件复制到 Trader 仓库
-cp -r analysis/ ~/Trader/analysis/
-cp -r alpha/bidirectional_wrapper.py ~/Trader/alpha/
-cp -r alpha/regime_allocator.py ~/Trader/alpha/
-cp -r alpha/enhanced_exit.py ~/Trader/alpha/
-cp -r alpha/ml_signal_filter.py ~/Trader/alpha/
-cp backtest_walkforward.py ~/Trader/
-cp integration_patch.py ~/Trader/
-
-# 2. 确保 analysis/ 目录下有 __init__.py
-touch ~/Trader/analysis/__init__.py
-```
+> Generated: 2026-04-12
+> 状态: 🔴 尚未达到上线标准，需要完成以下所有步骤
 
 ---
 
-## Phase 1: 补充数据 (30分钟)
+## 当前步骤：运行诊断
 
-> 目标: 获取做决策需要的基础数据
+### ✅ 你需要做的
 
-### 1.1 同步更多历史数据
+1. **将 `phase2_diagnostic.py` 放到项目根目录下**（和 `data/quant.db` 同级）
+2. **运行诊断脚本**：
+   ```bash
+   python phase2_diagnostic.py
+   ```
+3. **返回以下文件给我**：
+   - `phase2_report.json` — 诊断脚本的输出（最重要）
+   - 你的策略进场逻辑核心代码（`strategy.py` 或类似文件中的 `generate_signal` / `check_entry` 方法）
+   - 如果方便，也把你的回测引擎主循环代码发给我（`backtest.py` 中的 `run()` 方法）
 
-如果数据库中数据不足 2 年，先补数据:
+### 📋 我需要从 `phase2_report.json` 中获取的关键信息
 
-```bash
-cd ~/Trader
-# 确认数据量
-python main.py --validate
-
-# 如果需要补充 (会自动断点续传)
-python main.py --sync-data
-```
-
-### 1.2 运行数据诊断
-
-```bash
-python integration_patch.py --mode diagnose --start 2025-01-01
-```
-
-**收集输出:**
-- [ ] BTC/ETH 相关性数值
-- [ ] 各 Regime 分桶下的 PnL 分布
-- [ ] 滑点估算 vs 当前假设的差距
-- [ ] 权益曲线 CSV (analysis/output/ 下)
+| 信息 | 用途 |
+|------|------|
+| DB schema（表结构） | 理解你的数据存储方式，后续代码要能直接跑 |
+| 4 个标的的交叉相关性 | 决定多标的组合和仓位分配 |
+| 真实交易成本估计 | 修正回测假设 |
+| 各 regime 分布 | 设计 regime gate 的阈值 |
+| 原始信号 edge 统计 | **最关键** — 判断 MACD 信号本身有没有 edge |
+| Long+Short 回测结果 | 验证做空是否有正向贡献 |
+| BTC 4h walk-forward | 在最长历史上验证策略稳定性 |
+| 500 USDT 可行性 | 确认小资金的执行约束 |
 
 ---
 
-## Phase 2: P0 — 验证框架 (1小时)
+## 总体路线图
 
-> 目标: 确认当前策略不是过拟合
+### Phase 2A — 信号 edge 验证 ← 当前位置
+- [x] 数据可用性审计
+- [ ] 运行 `phase2_diagnostic.py`
+- [ ] 确认信号是否有统计显著的 edge（t-stat > 2）
+- [ ] 确认做空信号的贡献
+- [ ] 确认 500 USDT 可行性
 
-### 2.1 Walk-Forward 验证
+### Phase 2B — 策略重构
+> *仅在 2A 确认有 edge 后才进行*
+- [ ] 基于诊断结果重写策略入场/出场逻辑
+- [ ] Regime gate 硬编码（ADX + 波动率阈值）
+- [ ] 简化出场（去掉不赚钱的出场方式）
+- [ ] 多标的回测（BTC/ETH/BNB/SOL）
+- [ ] 相关性感知仓位管理
 
-```bash
-# 两个策略都要跑
-python integration_patch.py --mode walkforward \
-  --train-days 180 --test-days 60
+### Phase 2C — 稳健性验证
+- [ ] 全量历史 walk-forward（BTC 4h, 5.5 年）
+- [ ] 参数敏感性（仅测 2-3 个核心参数）
+- [ ] OOS 验证：在 ETH/BNB/SOL 上不调参直接跑
+- [ ] Monte Carlo 仿真（打乱交易顺序，看权益曲线分布）
 
-# 如果数据足够长，也可以尝试不同窗口
-python backtest_walkforward.py --strategy triple_ema \
-  --train-days 120 --test-days 45
-python backtest_walkforward.py --strategy macd_momentum \
-  --train-days 120 --test-days 45
-```
+### Phase 2D — 上线准备
+- [ ] Paper trading 模块开发
+- [ ] 60 天模拟盘运行
+- [ ] 风控模块（日亏损限制、连亏暂停）
+- [ ] 异常处理（API 断连、数据延迟）
+- [ ] 500 USDT 小资金实盘启动
 
-**关键判断标准:**
-- [ ] 窗口胜率 >= 60%? (至少超过半数窗口盈利)
-- [ ] OOS Sharpe > 0.5?
-- [ ] 最差窗口亏损 < 总资金的 5%?
-
-### 2.2 参数敏感性扫描
-
-```bash
-python integration_patch.py --mode sensitivity \
-  --strategy triple_ema --start 2025-01-01
-
-python analysis/param_sensitivity.py \
-  --strategy macd_momentum --start 2025-01-01 --mode 1d
-```
-
-**关键判断标准:**
-- [ ] 哪些参数被标记为 FRAGILE?
-- [ ] 最优点周围的参数组合表现如何?
-
----
-
-## Phase 3: P3 — 增强出场 (30分钟)
-
-> 目标: 解决追踪止损过紧 + 缺少分批止盈的问题
-
-```bash
-python integration_patch.py --mode enhanced --start 2025-01-01
-```
-
-**对比原版 vs 增强版:**
-- [ ] PnL 变化
-- [ ] Sharpe 变化
-- [ ] 最大回撤变化
-- [ ] 交易数量变化 (如果大幅减少说明分批止盈在工作)
+### Phase 2E — 扩展与优化
+- [ ] 观察 30 天实盘后评估是否扩展到 5000 USDT
+- [ ] 根据实盘数据校准滑点模型
+- [ ] 考虑增加 1h 时间框架
+- [ ] 考虑增加更多低相关标的
 
 ---
 
-## Phase 4: P4 — ML 过滤 (1小时)
+## 关键决策点
 
-> 目标: 用 ML 模型过滤低质量信号
+### 🚦 Gate 1: 信号 edge 是否存在？
+如果 `phase2_report.json` 中 MACD 信号的 t-stat < 1.5 且所有方向、所有标的都没有显著 edge：
+→ **停止当前策略方向**，需要重新设计信号逻辑
 
-### 4.1 训练 ML 模型
+如果 t-stat > 2 在部分条件下成立：
+→ **继续但缩窄范围**，只在有 edge 的 regime 和方向上交易
 
-```bash
-# 用 2024 年数据训练 (如果有)
-python integration_patch.py --mode ml_train \
-  --ml-train-start 2024-01-01 --ml-train-end 2024-12-31
+### 🚦 Gate 2: 500 USDT 够不够？
+如果需要 >5x 杠杆才能达到最小仓位：
+→ 建议先在 paper trading 中验证，等资金到 5000 再实盘
+→ 或切换到允许更小仓位的交易所
 
-# 如果没有 2024 数据，用 2025 前半年
-python integration_patch.py --mode ml_train \
-  --ml-train-start 2025-01-01 --ml-train-end 2025-06-30
-```
-
-**关键判断:**
-- [ ] AUC 是否 >= 0.55? (低于 0.52 不建议启用)
-- [ ] Top 10 特征是否合理?
-
-### 4.2 ML 过滤回测
-
-如果 AUC >= 0.55:
-
-```python
-# 在 Python 中手动跑 (或添加到 integration_patch)
-from backtest_runner import BacktestEngine
-from alpha.ml_signal_filter import MLSignalFilter, patch_strategy_with_ml
-
-engine = BacktestEngine(db_path="data/quant.db", strategy_name="macd_momentum",
-                        start_date="2025-07-01")  # 用 ML 没见过的数据
-ml = MLSignalFilter.load("models/ml_filter.pkl")
-patch_strategy_with_ml(engine.strategy, ml, threshold=0.55)
-report = engine.run()
-```
+### 🚦 Gate 3: 做空能贡献正收益吗？
+如果做空信号在回测中持续亏损：
+→ 去掉做空，但需要接受交易频率低的现实
+→ 或切换到 1h 时间框架增加交易频率
 
 ---
 
-## Phase 5: P1 + P2 (后续迭代)
+## 上线盈利的最低标准
 
-> 这两个需要修改 backtest_runner.py 的核心循环，建议在 Phase 2-4 验证完毕后再做
-
-### 5.1 P1: 做空 — 需要 Binance Futures API 支持
-
-- [ ] 先在 `backtest_runner.py` 中添加 SHORT 仓位逻辑
-- [ ] 在 `BidirectionalWrapper` 中包装现有策略
-- [ ] 回测对比 Long-only vs Long+Short
-
-### 5.2 P2: Regime 动态分配
-
-- [ ] 在 `backtest_runner.py` 中集成 `RegimeAllocator`
-- [ ] 按 regime 动态调整两个策略的资金比例
-- [ ] 回测对比 固定分配 vs 动态分配
-
-### 5.3 P5: 新增标的
-
-```bash
-# 1. 更新 config/settings.yaml (参考 config/symbols_extended.yaml)
-# 2. 同步新标的数据
-python main.py --sync-data
-# 3. 回测
-python main.py --backtest --strategy triple_ema
-```
-
----
-
-## ⚡ 速查: 命令汇总
-
-| 步骤 | 命令 | 耗时 |
+| 指标 | 阈值 | 当前 |
 |------|------|------|
-| 诊断 | `python integration_patch.py --mode diagnose` | 2分钟 |
-| WF验证 | `python integration_patch.py --mode walkforward` | 5-10分钟 |
-| 敏感性 | `python integration_patch.py --mode sensitivity` | 10-30分钟 |
-| 增强出场 | `python integration_patch.py --mode enhanced` | 3分钟 |
-| ML训练 | `python integration_patch.py --mode ml_train` | 3-5分钟 |
-| 全量 | `python integration_patch.py --mode full` | 30-60分钟 |
+| 总交易笔数（回测） | ≥150 | ~24（严重不足） |
+| Walk-forward OOS Sharpe | ≥0.6 | 0.395（不达标） |
+| WF fold win rate | ≥40% | 32.3%（不达标） |
+| Profit factor | ≥1.3 | 1.18（不达标） |
+| 参数 FRAGILE 比例 | <30% | ~86%（严重不达标） |
+| 真实成本后仍盈利 | ✅ | ❓（待验证） |
+| Paper trading 30 天 | 正收益 | 未做 |
+
+---
+
+## 你现在的 action item
+
+```bash
+# 1. 复制文件到项目目录
+cp phase2_diagnostic.py /path/to/your/project/
+
+# 2. 运行
+cd /path/to/your/project/
+python phase2_diagnostic.py
+
+# 3. 返回结果
+# - phase2_report.json
+# - 你的 strategy.py 核心代码（进场逻辑部分）
+# - 你的 backtest.py 核心代码（如果方便）
+```

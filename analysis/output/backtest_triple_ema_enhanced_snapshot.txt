@@ -1,0 +1,112 @@
+======================================================================
+BACKTEST SNAPSHOT (Unified Strategy)
+Generated: 2026-04-12 22:16:43
+Database: data/quant.db
+Period: 2025-01-01 ~ all
+======================================================================
+
+======================================================================
+SECTION: SUMMARY
+======================================================================
+  strategy: triple_ema
+  primary_interval: 4h
+  higher_interval: 1d
+  initial_capital: 10000.0
+  final_equity: 10160.78
+  total_return_pct: 1.61
+  total_pnl: 160.78
+  buy_hold_return_pct: -29.13
+  vs_buy_hold_pct: 30.74
+  max_drawdown_pct: 0.83
+  sharpe_ratio: 0.855
+  elapsed_seconds: 1.3
+
+======================================================================
+SECTION: TRADES_OVERVIEW
+======================================================================
+  total_trades: 4
+  win_rate_pct: 50.0
+  avg_win: 150.72
+  avg_loss: -70.33
+  profit_factor: 2.143
+  expectancy: 40.2
+  best_trade: 196.9
+  worst_trade: -75.16
+  avg_holding_bars: 10.5
+
+======================================================================
+SECTION: SYMBOL_STATS
+======================================================================
+  [BTCUSDT]
+    trades: 2
+    win_rate_pct: 0.0
+    total_pnl: -140.66
+  [ETHUSDT]
+    trades: 2
+    win_rate_pct: 100.0
+    total_pnl: 301.45
+
+======================================================================
+SECTION: REGIME_STATS
+======================================================================
+  [N/A]
+    trades: 4
+    win_rate_pct: 50.0
+    total_pnl: 160.79
+
+======================================================================
+SECTION: EXIT_REASONS
+======================================================================
+  [adaptive_trailing_stop]
+    count: 2
+    pnl: -140.66
+  [partial_profit_1]
+    count: 2
+    pnl: 301.45
+
+======================================================================
+SECTION: STRATEGY_CONFIG
+======================================================================
+  primary_interval: 4h
+  higher_interval: 1d
+  ema_fast: 8
+  ema_mid: 21
+  ema_slow: 55
+  daily_fast: 20
+  daily_slow: 50
+  min_adx: 18.0
+  max_rsi: 72.0
+  min_rsi: 45.0
+  min_volume_ratio: 0.9
+  pullback_min_atr: -0.9
+  pullback_max_atr: 0.6
+  trail_atr_mult: 2.8
+  stop_atr_mult: 2.0
+  ema_stop_buffer_atr: 0.5
+  max_holding_bars: 45
+  cooldown_bars: 6
+  risk_per_trade: 0.015
+  max_position_pct: 0.5
+  min_trade_value: 12.0
+  commission_pct: 0.001
+  slippage_pct: 0.001
+
+======================================================================
+SECTION: MONTHLY_PNL
+======================================================================
+  2025-05: +131.40 USDT
+  2025-07: +29.39 USDT
+
+======================================================================
+SECTION: ALL_TRADES
+======================================================================
+   # | Symbol     | Strategy       |      Entry |       Exit |        PnL |     PnL% |  Bars | Reason             | Entry Time       | Exit Time       
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+   1 | BTCUSDT    | triple_ema     |  109656.71 |  107000.20 |     -65.50 |  -2.42% |     8 | adaptive_trailing_stop | 2025-05-27 04:00 | 2025-05-28 12:00
+   2 | BTCUSDT    | triple_ema     |  118685.96 |  115304.24 |     -75.16 |  -2.85% |     9 | adaptive_trailing_stop | 2025-07-23 12:00 | 2025-07-25 00:00
+   3 | ETHUSDT    | triple_ema     |    2503.78 |    2719.28 |    +196.90 |  +8.61% |    14 | partial_profit_1   | 2025-05-20 16:00 | 2025-05-23 00:00
+   4 | ETHUSDT    | triple_ema     |    2546.51 |    2654.17 |    +104.55 |  +4.23% |    11 | partial_profit_1   | 2025-07-07 16:00 | 2025-07-09 12:00
+
+======================================================================
+END OF SNAPSHOT
+======================================================================

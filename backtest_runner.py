@@ -23,6 +23,7 @@ import pandas as pd
 
 from alpha.strategy_registry import available_strategies, build_strategy
 from data.features import FeatureEngine
+from data.storage import INTERVAL_MS
 from utils.logger import get_logger
 
 logger = get_logger("backtest")
@@ -76,14 +77,23 @@ class BacktestEngine:
             * 1000
         )
 
+    def _feature_warmup_start_ms(self, interval: str) -> Optional[int]:
+        """在 start_date 之前多取若干根 K 线，供 FeatureEngine 长窗口稳定（Walk-Forward 短窗必需）。"""
+        if not self.start_date:
+            return None
+        wmax = max(self.feature_engine.windows) + 20
+        interval_ms = int(INTERVAL_MS.get(interval, 3600000))
+        return self._date_to_ms(self.start_date) - wmax * interval_ms
+
     def _load_klines(self, symbol: str, interval: str) -> pd.DataFrame:
         conn = sqlite3.connect(self.db_path)
         conditions = ["symbol=?", "interval=?"]
         params: list = [symbol, interval]
 
         if self.start_date:
+            warm = self._feature_warmup_start_ms(interval)
             conditions.append("open_time >= ?")
-            params.append(self._date_to_ms(self.start_date))
+            params.append(warm if warm is not None else self._date_to_ms(self.start_date))
         if self.end_date:
             conditions.append("open_time <= ?")
             params.append(self._date_to_ms(self.end_date))
@@ -137,6 +147,9 @@ class BacktestEngine:
         higher_feat = self._compute_features(higher_df) if higher_df is not None and not higher_df.empty else None
         prepared = self.strategy.prepare_features(primary_feat, higher_feat)
         prepared = prepared.dropna(subset=["close"]).reset_index(drop=True)
+        if self.start_date and not prepared.empty and "open_time" in prepared.columns:
+            ts0 = self._date_to_ms(self.start_date)
+            prepared = prepared[prepared["open_time"] >= ts0].copy().reset_index(drop=True)
         return primary_df, higher_df, prepared
 
     def _backtest_symbol(self, symbol: str, prepared: pd.DataFrame, capital: float) -> tuple[float, list[dict], list[float]]:

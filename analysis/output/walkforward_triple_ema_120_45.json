@@ -1,0 +1,398 @@
+{
+  "strategy": "triple_ema",
+  "train_days": 120,
+  "test_days": 45,
+  "n_folds": 42,
+  "n_positive_folds": 1,
+  "fold_win_rate": 2.4,
+  "total_oos_pnl": 259.92,
+  "avg_fold_pnl": 6.19,
+  "std_fold_pnl": 156.72,
+  "oos_sharpe": 0.112,
+  "avg_sharpe": -0.343,
+  "worst_fold_pnl": -368.26,
+  "best_fold_pnl": 936.51,
+  "max_fold_drawdown": 3.68,
+  "avg_trades_per_fold": 0.2,
+  "total_trades": 10,
+  "folds": [
+    {
+      "fold_id": 0,
+      "test_period": "2021-02-17 ~ 2021-04-03",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 1,
+      "test_period": "2021-04-03 ~ 2021-05-18",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 2,
+      "test_period": "2021-05-18 ~ 2021-07-02",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 3,
+      "test_period": "2021-07-02 ~ 2021-08-16",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 4,
+      "test_period": "2021-08-16 ~ 2021-09-30",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 5,
+      "test_period": "2021-09-30 ~ 2021-11-14",
+      "pnl": -368.26,
+      "return_pct": -3.68,
+      "trades": 2,
+      "sharpe": -6.288,
+      "max_dd": 3.68
+    },
+    {
+      "fold_id": 6,
+      "test_period": "2021-11-14 ~ 2021-12-29",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 7,
+      "test_period": "2021-12-29 ~ 2022-02-12",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 8,
+      "test_period": "2022-02-12 ~ 2022-03-29",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 9,
+      "test_period": "2022-03-29 ~ 2022-05-13",
+      "pnl": -63.15,
+      "return_pct": -0.63,
+      "trades": 1,
+      "sharpe": -3.341,
+      "max_dd": 0.63
+    },
+    {
+      "fold_id": 10,
+      "test_period": "2022-05-13 ~ 2022-06-27",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 11,
+      "test_period": "2022-06-27 ~ 2022-08-11",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 12,
+      "test_period": "2022-08-11 ~ 2022-09-25",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 13,
+      "test_period": "2022-09-25 ~ 2022-11-09",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 14,
+      "test_period": "2022-11-09 ~ 2022-12-24",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 15,
+      "test_period": "2022-12-24 ~ 2023-02-07",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 16,
+      "test_period": "2023-02-07 ~ 2023-03-24",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 17,
+      "test_period": "2023-03-24 ~ 2023-05-08",
+      "pnl": -78.17,
+      "return_pct": -0.78,
+      "trades": 1,
+      "sharpe": -4.354,
+      "max_dd": 0.78
+    },
+    {
+      "fold_id": 18,
+      "test_period": "2023-05-08 ~ 2023-06-22",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 19,
+      "test_period": "2023-06-22 ~ 2023-08-06",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 20,
+      "test_period": "2023-08-06 ~ 2023-09-20",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 21,
+      "test_period": "2023-09-20 ~ 2023-11-04",
+      "pnl": -61.44,
+      "return_pct": -0.61,
+      "trades": 1,
+      "sharpe": -1.409,
+      "max_dd": 1.17
+    },
+    {
+      "fold_id": 22,
+      "test_period": "2023-11-04 ~ 2023-12-19",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 23,
+      "test_period": "2023-12-19 ~ 2024-02-02",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 24,
+      "test_period": "2024-02-02 ~ 2024-03-18",
+      "pnl": -76.22,
+      "return_pct": -0.76,
+      "trades": 1,
+      "sharpe": -4.986,
+      "max_dd": 0.76
+    },
+    {
+      "fold_id": 25,
+      "test_period": "2024-03-18 ~ 2024-05-02",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 26,
+      "test_period": "2024-05-02 ~ 2024-06-16",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 27,
+      "test_period": "2024-06-16 ~ 2024-07-31",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 28,
+      "test_period": "2024-07-31 ~ 2024-09-14",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 29,
+      "test_period": "2024-09-14 ~ 2024-10-29",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 30,
+      "test_period": "2024-10-29 ~ 2024-12-13",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 31,
+      "test_period": "2024-12-13 ~ 2025-01-27",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 32,
+      "test_period": "2025-01-27 ~ 2025-03-13",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 33,
+      "test_period": "2025-03-13 ~ 2025-04-27",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 34,
+      "test_period": "2025-04-27 ~ 2025-06-11",
+      "pnl": -29.35,
+      "return_pct": -0.29,
+      "trades": 2,
+      "sharpe": -0.457,
+      "max_dd": 2.27
+    },
+    {
+      "fold_id": 35,
+      "test_period": "2025-06-11 ~ 2025-07-26",
+      "pnl": 936.51,
+      "return_pct": 9.37,
+      "trades": 2,
+      "sharpe": 6.414,
+      "max_dd": 2.69
+    },
+    {
+      "fold_id": 36,
+      "test_period": "2025-07-26 ~ 2025-09-09",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 37,
+      "test_period": "2025-09-09 ~ 2025-10-24",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 38,
+      "test_period": "2025-10-24 ~ 2025-12-08",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 39,
+      "test_period": "2025-12-08 ~ 2026-01-22",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 40,
+      "test_period": "2026-01-22 ~ 2026-03-08",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 41,
+      "test_period": "2026-03-08 ~ 2026-04-12",
+      "pnl": 0.0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    }
+  ]
+}
