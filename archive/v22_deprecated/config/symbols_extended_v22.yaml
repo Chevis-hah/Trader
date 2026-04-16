@@ -1,0 +1,62 @@
+# ============================================================
+# 扩展标的配置 v2.2
+#
+# BTC/ETH 相关性 0.827 (诊断数据), 风险分散效果差
+# 新增 SOL/BNB 降低组合相关性
+#
+# 使用方式:
+#   将此文件内容合并到 config/settings.yaml 的 universe 部分
+#   然后运行 python main.py --sync-data 拉取新标的数据
+# ============================================================
+
+universe:
+  quote_currency: "USDT"
+  symbols:
+    # ---- 核心标的 ----
+    - symbol: "BTCUSDT"
+      min_qty: 0.00001
+      qty_precision: 5
+      price_precision: 2
+      min_notional: 10.0
+      # 滑点: 20.9 bps (诊断数据)
+
+    - symbol: "ETHUSDT"
+      min_qty: 0.0001
+      qty_precision: 4
+      price_precision: 2
+      min_notional: 10.0
+      # 滑点: 25.8 bps (诊断数据)
+
+    # ---- Phase 4: 分散化标的 ----
+    - symbol: "SOLUSDT"
+      min_qty: 0.01
+      qty_precision: 2
+      price_precision: 2
+      min_notional: 10.0
+      # SOL 与 BTC 相关性通常 0.5-0.7, 有分散效果
+
+    - symbol: "BNBUSDT"
+      min_qty: 0.001
+      qty_precision: 3
+      price_precision: 2
+      min_notional: 10.0
+
+  # ---- 扩展窗口 (6 个时间框架) ----
+  intervals:
+    - "1h"
+    - "4h"
+    - "1d"
+  history_days: 1825  # 5 年
+
+# ============================================================
+# 同步新标的数据:
+#   python main.py --sync-data
+#
+# 验证数据:
+#   python main.py --validate
+#
+# 跑因子扫描 (含新标的):
+#   python factor_signal_scan.py --db data/quant.db --interval 4h \
+#       --symbols BTCUSDT ETHUSDT SOLUSDT BNBUSDT \
+#       --output factor_scan_4symbols.json
+# ============================================================

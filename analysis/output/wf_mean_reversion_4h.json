@@ -1,0 +1,345 @@
+{
+  "strategy": "mean_reversion",
+  "interval": "4h",
+  "train_days": 360,
+  "test_days": 60,
+  "use_ml_filter": false,
+  "n_folds": 33,
+  "n_positive_folds": 13,
+  "fold_win_rate": 39.4,
+  "total_oos_pnl": -425.18,
+  "avg_fold_pnl": -12.88,
+  "total_trades": 59,
+  "folds": [
+    {
+      "fold_id": 0,
+      "symbol": "BTCUSDT",
+      "test_period": "2021-10-15 ~ 2021-12-14",
+      "pnl": -228.95,
+      "return_pct": -2.29,
+      "trades": 4,
+      "sharpe": -1.016,
+      "max_dd": 2.73
+    },
+    {
+      "fold_id": 1,
+      "symbol": "BTCUSDT",
+      "test_period": "2021-12-14 ~ 2022-02-12",
+      "pnl": -101.0,
+      "return_pct": -1.01,
+      "trades": 1,
+      "sharpe": 0.0,
+      "max_dd": 1.01
+    },
+    {
+      "fold_id": 2,
+      "symbol": "BTCUSDT",
+      "test_period": "2022-02-12 ~ 2022-04-13",
+      "pnl": 0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 3,
+      "symbol": "BTCUSDT",
+      "test_period": "2022-04-13 ~ 2022-06-12",
+      "pnl": -48.57,
+      "return_pct": -0.49,
+      "trades": 1,
+      "sharpe": 0.0,
+      "max_dd": 0.49
+    },
+    {
+      "fold_id": 4,
+      "symbol": "BTCUSDT",
+      "test_period": "2022-06-12 ~ 2022-08-11",
+      "pnl": 39.94,
+      "return_pct": 0.4,
+      "trades": 2,
+      "sharpe": 0.85,
+      "max_dd": 0.03
+    },
+    {
+      "fold_id": 5,
+      "symbol": "BTCUSDT",
+      "test_period": "2022-08-11 ~ 2022-10-10",
+      "pnl": -279.01,
+      "return_pct": -2.79,
+      "trades": 3,
+      "sharpe": -2.137,
+      "max_dd": 2.79
+    },
+    {
+      "fold_id": 6,
+      "symbol": "BTCUSDT",
+      "test_period": "2022-10-10 ~ 2022-12-09",
+      "pnl": 52.7,
+      "return_pct": 0.53,
+      "trades": 2,
+      "sharpe": 1.273,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 7,
+      "symbol": "BTCUSDT",
+      "test_period": "2022-12-09 ~ 2023-02-07",
+      "pnl": -15.41,
+      "return_pct": -0.15,
+      "trades": 1,
+      "sharpe": 0.0,
+      "max_dd": 0.15
+    },
+    {
+      "fold_id": 8,
+      "symbol": "BTCUSDT",
+      "test_period": "2023-02-07 ~ 2023-04-08",
+      "pnl": -8.48,
+      "return_pct": -0.08,
+      "trades": 1,
+      "sharpe": 0.0,
+      "max_dd": 0.08
+    },
+    {
+      "fold_id": 9,
+      "symbol": "BTCUSDT",
+      "test_period": "2023-04-08 ~ 2023-06-07",
+      "pnl": 144.79,
+      "return_pct": 1.45,
+      "trades": 3,
+      "sharpe": 0.923,
+      "max_dd": 0.53
+    },
+    {
+      "fold_id": 10,
+      "symbol": "BTCUSDT",
+      "test_period": "2023-06-07 ~ 2023-08-06",
+      "pnl": 97.3,
+      "return_pct": 0.97,
+      "trades": 3,
+      "sharpe": 0.607,
+      "max_dd": 0.34
+    },
+    {
+      "fold_id": 11,
+      "symbol": "BTCUSDT",
+      "test_period": "2023-08-06 ~ 2023-10-05",
+      "pnl": -77.58,
+      "return_pct": -0.78,
+      "trades": 1,
+      "sharpe": 0.0,
+      "max_dd": 0.78
+    },
+    {
+      "fold_id": 12,
+      "symbol": "BTCUSDT",
+      "test_period": "2023-10-05 ~ 2023-12-04",
+      "pnl": 0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 13,
+      "symbol": "BTCUSDT",
+      "test_period": "2023-12-04 ~ 2024-02-02",
+      "pnl": -191.73,
+      "return_pct": -1.92,
+      "trades": 2,
+      "sharpe": -3.349,
+      "max_dd": 1.92
+    },
+    {
+      "fold_id": 14,
+      "symbol": "BTCUSDT",
+      "test_period": "2024-02-02 ~ 2024-04-02",
+      "pnl": 37.12,
+      "return_pct": 0.37,
+      "trades": 2,
+      "sharpe": 0.699,
+      "max_dd": 0.08
+    },
+    {
+      "fold_id": 15,
+      "symbol": "BTCUSDT",
+      "test_period": "2024-04-02 ~ 2024-06-01",
+      "pnl": 14.1,
+      "return_pct": 0.14,
+      "trades": 1,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 16,
+      "symbol": "BTCUSDT",
+      "test_period": "2024-06-01 ~ 2024-07-31",
+      "pnl": 80.44,
+      "return_pct": 0.8,
+      "trades": 1,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 17,
+      "symbol": "BTCUSDT",
+      "test_period": "2024-07-31 ~ 2024-09-29",
+      "pnl": 0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 18,
+      "symbol": "BTCUSDT",
+      "test_period": "2024-09-29 ~ 2024-11-28",
+      "pnl": -89.57,
+      "return_pct": -0.9,
+      "trades": 2,
+      "sharpe": -1.612,
+      "max_dd": 0.9
+    },
+    {
+      "fold_id": 19,
+      "symbol": "BTCUSDT",
+      "test_period": "2024-11-28 ~ 2025-01-27",
+      "pnl": 56.55,
+      "return_pct": 0.57,
+      "trades": 3,
+      "sharpe": 0.233,
+      "max_dd": 1.03
+    },
+    {
+      "fold_id": 20,
+      "symbol": "BTCUSDT",
+      "test_period": "2025-01-27 ~ 2025-03-28",
+      "pnl": 214.27,
+      "return_pct": 2.14,
+      "trades": 3,
+      "sharpe": 3.938,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 21,
+      "symbol": "BTCUSDT",
+      "test_period": "2025-03-28 ~ 2025-05-27",
+      "pnl": 0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 22,
+      "symbol": "BTCUSDT",
+      "test_period": "2025-05-27 ~ 2025-07-26",
+      "pnl": 63.6,
+      "return_pct": 0.64,
+      "trades": 2,
+      "sharpe": 0.578,
+      "max_dd": 0.23
+    },
+    {
+      "fold_id": 23,
+      "symbol": "BTCUSDT",
+      "test_period": "2025-07-26 ~ 2025-09-24",
+      "pnl": -193.81,
+      "return_pct": -1.94,
+      "trades": 2,
+      "sharpe": -60.325,
+      "max_dd": 1.94
+    },
+    {
+      "fold_id": 24,
+      "symbol": "BTCUSDT",
+      "test_period": "2025-09-24 ~ 2025-11-23",
+      "pnl": -203.05,
+      "return_pct": -2.03,
+      "trades": 2,
+      "sharpe": -6.153,
+      "max_dd": 2.03
+    },
+    {
+      "fold_id": 25,
+      "symbol": "BTCUSDT",
+      "test_period": "2025-11-23 ~ 2026-01-22",
+      "pnl": 155.03,
+      "return_pct": 1.55,
+      "trades": 1,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 26,
+      "symbol": "BTCUSDT",
+      "test_period": "2026-01-22 ~ 2026-03-23",
+      "pnl": -19.46,
+      "return_pct": -0.19,
+      "trades": 3,
+      "sharpe": -0.141,
+      "max_dd": 0.74
+    },
+    {
+      "fold_id": 0,
+      "symbol": "ETHUSDT",
+      "test_period": "2025-04-07 ~ 2025-06-06",
+      "pnl": 99.37,
+      "return_pct": 0.99,
+      "trades": 3,
+      "sharpe": 3.335,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 1,
+      "symbol": "ETHUSDT",
+      "test_period": "2025-06-06 ~ 2025-08-05",
+      "pnl": 90.43,
+      "return_pct": 0.9,
+      "trades": 1,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 2,
+      "symbol": "ETHUSDT",
+      "test_period": "2025-08-05 ~ 2025-10-04",
+      "pnl": -13.02,
+      "return_pct": -0.13,
+      "trades": 2,
+      "sharpe": -0.34,
+      "max_dd": 0.26
+    },
+    {
+      "fold_id": 3,
+      "symbol": "ETHUSDT",
+      "test_period": "2025-10-04 ~ 2025-12-03",
+      "pnl": -56.19,
+      "return_pct": -0.56,
+      "trades": 3,
+      "sharpe": -0.379,
+      "max_dd": 1.16
+    },
+    {
+      "fold_id": 4,
+      "symbol": "ETHUSDT",
+      "test_period": "2025-12-03 ~ 2026-02-01",
+      "pnl": 0,
+      "return_pct": 0.0,
+      "trades": 0,
+      "sharpe": 0.0,
+      "max_dd": 0.0
+    },
+    {
+      "fold_id": 5,
+      "symbol": "ETHUSDT",
+      "test_period": "2026-02-01 ~ 2026-04-02",
+      "pnl": -44.99,
+      "return_pct": -0.45,
+      "trades": 4,
+      "sharpe": -0.382,
+      "max_dd": 0.75
+    }
+  ]
+}

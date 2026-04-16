@@ -1,12 +1,25 @@
-requests>=2.28.0
-requests[socks]>=2.28.0
+# Trader v2.2 依赖
+# pip install -r requirements.txt --break-system-packages
+
+# 核心
+numpy>=1.24.0
 pandas>=1.5.0
-numpy>=1.23.0
-pyyaml>=6.0
-scikit-learn>=1.2.0
 scipy>=1.10.0
+PyYAML>=6.0
+requests>=2.28.0
+
+# 数据库
+# sqlite3 内置
+
+# ML
+scikit-learn>=1.2.0
+lightgbm>=4.0.0          # Phase 2: 替代 sklearn GBM (可选, 自动降级)
+
+# WebSocket
 websockets>=12.0
-aiohttp>=3.9.0
-# 可选（推荐安装以提升性能）
-# lightgbm>=4.0.0
-# xgboost>=2.0.0
+
+# 绘图 (可选)
+# matplotlib>=3.7.0
+
+# 开发
+pytest>=7.0.0

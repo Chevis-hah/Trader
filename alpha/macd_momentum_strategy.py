@@ -1,218 +1,184 @@
 """
-低频 4h 趋势跟随策略：MACD Momentum
+MACD Momentum Strategy — v2.3 (回滚至 v2.0 纯规则)
 
-设计目标：
-- 只在大级别顺风时做 MACD 柱状图翻正的动量启动
-- 减少震荡区反复开仓
+变更历史:
+  v2.0: 纯 MACD 交叉 + ADX 过滤 → 92 trades, +834 PnL, 32.3% fold WR
+  v2.1: + trail_atr_mult, cooldown_bars 等调参 → 略改善但不稳
+  v2.2: + zscore / ma_dev / keltner 三层过度拉伸过滤 → 12 trades, +57 PnL (过拟合)
+  v2.3: 回滚到 v2.0 纯规则 + 删除 min_rsi/max_rsi/max_holding_bars 等无效参数
+
+失效证据:
+  - sensitivity_macd_momentum.json:
+    * min_rsi good_ratio = 0.0 (4 tested)
+    * max_rsi good_ratio = 0.0 (4 tested)
+    * max_holding_bars good_ratio = 0.0 (4 tested)
+  - wf_macd_momentum_4h.json (v2.2):
+    * 12 trades, fold WR 9.1%, 过滤器把 92 笔压到 12 笔
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 from utils.logger import get_logger
 
-logger = get_logger("macd_momentum_strategy")
+logger = get_logger("macd_momentum")
 
 
 @dataclass
-class MACDMomentumStrategyConfig:
-    primary_interval: str = "4h"
-    higher_interval: str = "1d"
+class MACDMomentumConfig:
+    """v2.3 配置 —— 仅保留经 WF 验证有效的参数"""
+    # 入场
+    min_adx: float = 20.0             # ADX 门限，v2.0 原始值
 
-    trend_ema: int = 50
-    daily_fast: int = 20
-    daily_slow: int = 50
+    # 止损 / 跟踪
+    stop_atr_mult: float = 2.0        # 初始止损 ATR 倍数
+    trail_atr_mult: float = 2.8       # 跟踪止损 ATR 倍数（敏感度测试最稳定值）
 
-    min_adx: float = 16.0
-    min_rsi: float = 48.0
-    max_rsi: float = 74.0
-    min_volume_ratio: float = 0.90
+    # 仓位 / 冷却
+    risk_per_trade: float = 0.02      # 每笔风险 2%
+    cooldown_bars: int = 3            # 平仓后冷却
 
-    trail_atr_mult: float = 2.5
-    stop_atr_mult: float = 2.0
-    max_holding_bars: int = 36
-    cooldown_bars: int = 5
-
-    risk_per_trade: float = 0.012
-    max_position_pct: float = 0.45
-    min_trade_value: float = 12.0
-
-    commission_pct: float = 0.001
-    slippage_pct: float = 0.001
+    # ---- 已删除的参数（作为警示保留注释）----
+    # min_rsi / max_rsi          — good_ratio=0, 纯噪声
+    # max_holding_bars           — good_ratio=0, 纯噪声
+    # zscore_threshold           — v2.2 过度拉伸过滤，回滚删除
+    # ma_dev_threshold           — v2.2 过度拉伸过滤，回滚删除
+    # keltner_threshold          — v2.2 过度拉伸过滤，回滚删除
 
 
 class MACDMomentumStrategy:
-    name = "macd_momentum"
-    display_name = "MACD Momentum"
+    """
+    MACD 动量突破策略 v2.3
 
-    def __init__(self, cfg: Optional[MACDMomentumStrategyConfig] = None):
-        self.cfg = cfg or MACDMomentumStrategyConfig()
+    核心逻辑:
+      1. MACD 线上穿 signal 线 (金叉)
+      2. ADX >= min_adx (趋势强度过滤)
+      3. 止损 = entry - stop_atr_mult * ATR
+      4. 跟踪止损 = max(price * (1 - trail_atr_mult * NATR), stop_loss)
+    """
 
-    @property
-    def primary_interval(self) -> str:
-        return self.cfg.primary_interval
-
-    @property
-    def higher_interval(self) -> str:
-        return self.cfg.higher_interval
+    def __init__(self, config: Optional[MACDMomentumConfig] = None):
+        self.cfg = config or MACDMomentumConfig()
 
     def prepare_features(
         self,
         features: pd.DataFrame,
-        higher_features: Optional[pd.DataFrame] = None,
+        higher_tf: Optional[pd.DataFrame] = None,
     ) -> pd.DataFrame:
-        feat = features.copy()
-
-        if "ema_50" not in feat.columns:
-            close = pd.to_numeric(feat["close"], errors="coerce")
-            feat["ema_50"] = close.ewm(span=self.cfg.trend_ema, adjust=False).mean()
-
-        if higher_features is not None and not higher_features.empty:
-            hf = higher_features.copy()
-            hf["ht_ema_fast"] = pd.to_numeric(hf["close"], errors="coerce").ewm(
-                span=self.cfg.daily_fast, adjust=False
-            ).mean()
-            hf["ht_ema_slow"] = pd.to_numeric(hf["close"], errors="coerce").ewm(
-                span=self.cfg.daily_slow, adjust=False
-            ).mean()
-            hf["daily_trend_ok"] = (
-                (pd.to_numeric(hf["close"], errors="coerce") > hf["ht_ema_fast"])
-                & (hf["ht_ema_fast"] > hf["ht_ema_slow"])
-            ).astype(float)
-
-            keep_cols = ["open_time", "ht_ema_fast", "ht_ema_slow", "daily_trend_ok"]
-            feat = pd.merge_asof(
-                feat.sort_values("open_time"),
-                hf[keep_cols].sort_values("open_time"),
-                on="open_time",
-                direction="backward",
-            )
-        else:
-            feat["daily_trend_ok"] = 1.0
-
-        return feat
+        """
+        本策略不需要额外特征工程，直接使用 FeatureEngine 的输出。
+        保留接口以和 strategy_registry 对齐。
+        """
+        return features
 
     def should_enter(
-        self,
-        row: pd.Series,
-        prev_row: Optional[pd.Series],
-        state: Optional[dict] = None,
+        self, row: pd.Series, prev: pd.Series, state: dict
     ) -> bool:
-        state = state or {}
-
-        close = float(row.get("close", 0) or 0)
-        ema50 = row.get("ema_50")
-        adx = row.get("adx_14")
-        rsi = row.get("rsi_14")
-        hist = row.get("macd_hist")
-        prev_hist = prev_row.get("macd_hist") if prev_row is not None else None
-        vol_ratio = row.get("rel_volume_20", 1.0)
-        daily_ok = row.get("daily_trend_ok", 1.0)
-        natr = row.get("natr_20")
-
-        if close <= 0 or any(pd.isna(v) for v in [ema50, adx, rsi, hist, prev_hist, natr]):
-            return False
-        if natr <= 0 or daily_ok < 0.5:
-            return False
-
-        if close <= ema50:
-            return False
-        if adx < self.cfg.min_adx:
-            return False
-        if rsi < self.cfg.min_rsi or rsi > self.cfg.max_rsi:
-            return False
-        if pd.notna(vol_ratio) and vol_ratio < self.cfg.min_volume_ratio:
-            return False
-
-        if not (prev_hist <= 0 < hist):
-            return False
-
+        """入场判断 (v2.0 纯规则)"""
+        # 冷却期检查
         cooldown_until = state.get("cooldown_until_bar", -1)
-        current_bar = state.get("bar_index", 0)
-        if current_bar <= cooldown_until:
+        if state.get("bar_index", 0) < cooldown_until:
+            return False
+
+        # --- MACD 金叉 ---
+        macd = row.get("macd")
+        macd_signal = row.get("macd_signal")
+        prev_macd = prev.get("macd")
+        prev_macd_signal = prev.get("macd_signal")
+
+        if any(pd.isna(x) for x in [macd, macd_signal, prev_macd, prev_macd_signal]):
+            return False
+
+        cross_above = (prev_macd <= prev_macd_signal) and (macd > macd_signal)
+        if not cross_above:
+            return False
+
+        # --- ADX 强度过滤 ---
+        adx = row.get("adx_14", 0)
+        if pd.isna(adx) or adx < self.cfg.min_adx:
             return False
 
         return True
 
-    def calc_position(self, equity: float, entry_price: float, row: pd.Series) -> tuple[float, float]:
+    def check_exit(
+        self,
+        row: pd.Series,
+        prev: pd.Series,
+        position: dict,
+        bar_count: int,
+    ) -> tuple[bool, str]:
+        """
+        退出判断
+
+        Returns:
+            (should_exit, reason)
+        """
+        close = float(row.get("close", 0) or 0)
+        if close <= 0:
+            return False, ""
+
+        # 1) 初始止损
+        stop_loss = position.get("stop_loss", 0)
+        if stop_loss > 0 and close <= stop_loss:
+            return True, "stop_loss"
+
+        # 2) 跟踪止损
+        highest = position.get("highest_since_entry", close)
+        atr_at_entry = position.get("atr_at_entry", 0)
+        if atr_at_entry > 0:
+            trail_stop = highest - self.cfg.trail_atr_mult * atr_at_entry
+            if close <= trail_stop:
+                return True, "trail_stop"
+
+        # 3) MACD 死叉 (反向信号退出)
+        macd = row.get("macd")
+        macd_signal = row.get("macd_signal")
+        prev_macd = prev.get("macd")
+        prev_macd_signal = prev.get("macd_signal")
+
+        if not any(pd.isna(x) for x in [macd, macd_signal, prev_macd, prev_macd_signal]):
+            cross_below = (prev_macd >= prev_macd_signal) and (macd < macd_signal)
+            if cross_below:
+                return True, "macd_cross_below"
+
+        return False, ""
+
+    def calc_position(
+        self, available_capital: float, entry_price: float, row: pd.Series
+    ) -> tuple[float, float]:
+        """
+        仓位 + 止损计算
+
+        Returns:
+            (qty, stop_loss_price)
+        """
         natr = float(row.get("natr_20", 0) or 0)
-        if entry_price <= 0 or natr <= 0:
+        if natr <= 0:
             return 0.0, 0.0
 
-        atr = natr * entry_price
-        stop_loss = entry_price - self.cfg.stop_atr_mult * atr
+        atr_price = natr * entry_price
+        stop_loss = entry_price - self.cfg.stop_atr_mult * atr_price
+        if stop_loss <= 0:
+            return 0.0, 0.0
+
+        # 基于固定风险比例计算仓位
         risk_per_unit = entry_price - stop_loss
         if risk_per_unit <= 0:
             return 0.0, 0.0
 
-        risk_amount = equity * self.cfg.risk_per_trade
-        qty = risk_amount / risk_per_unit
+        risk_budget = available_capital * self.cfg.risk_per_trade
+        qty = risk_budget / risk_per_unit
 
-        max_value = equity * self.cfg.max_position_pct
-        position_value = qty * entry_price
-        if position_value > max_value:
-            qty = max_value / entry_price
-
-        if qty * entry_price < self.cfg.min_trade_value:
-            return 0.0, 0.0
+        # 限制单笔最大仓位不超过可用资金 (避免杠杆隐含)
+        max_qty = available_capital / entry_price * 0.95
+        qty = min(qty, max_qty)
 
         return qty, stop_loss
 
-    def check_exit(
-        self,
-        row: pd.Series,
-        prev_row: Optional[pd.Series],
-        position: dict,
-        bar_count: int,
-    ) -> tuple[bool, str]:
-        close = float(row.get("close", 0) or 0)
-        natr = float(row.get("natr_20", 0) or 0)
-        daily_ok = row.get("daily_trend_ok", 1.0)
-        ema50 = row.get("ema_50")
-        macd_line = row.get("macd_line")
-        macd_signal = row.get("macd_signal")
-        prev_macd_line = prev_row.get("macd_line") if prev_row is not None else None
-        prev_macd_signal = prev_row.get("macd_signal") if prev_row is not None else None
-
-        atr = natr * close if natr > 0 else position.get("atr_at_entry", 0.0)
-        highest = position.get("highest_since_entry", close)
-        init_stop = position.get("stop_loss", 0.0)
-
-        if atr > 0:
-            trailing = max(init_stop, highest - self.cfg.trail_atr_mult * atr)
-            if close <= trailing:
-                return True, "trailing_stop"
-
-        if (
-            pd.notna(macd_line) and pd.notna(macd_signal)
-            and pd.notna(prev_macd_line) and pd.notna(prev_macd_signal)
-            and macd_line < macd_signal
-            and prev_macd_line >= prev_macd_signal
-        ):
-            return True, "macd_cross"
-
-        if daily_ok < 0.5 and pd.notna(ema50) and close < ema50:
-            return True, "daily_trend_break"
-
-        if bar_count >= self.cfg.max_holding_bars and close < position["entry_price"] * 1.01:
-            return True, "time_stop"
-
-        return False, ""
-
-    def on_trade_closed(self, state: dict, bar_index: int, reason: str):
-        if reason in {"trailing_stop", "macd_cross", "daily_trend_break", "time_stop"}:
-            state["cooldown_until_bar"] = bar_index + self.cfg.cooldown_bars
-
-    def signal_metadata(self, row: pd.Series) -> dict:
-        return {
-            "tag": "momentum_flip",
-            "strength": float(min(max(row.get("adx_14", 0) / 35.0, 0.0), 1.0)),
-            "context": {
-                "macd_hist": round(float(row.get("macd_hist", 0) or 0), 6),
-                "rsi": round(float(row.get("rsi_14", 0) or 0), 2),
-                "daily_trend_ok": int((row.get("daily_trend_ok", 1.0) or 0) >= 0.5),
-            },
-        }
+    def on_trade_closed(self, state: dict, bar_index: int, reason: str) -> None:
+        """平仓后更新冷却"""
+        state["cooldown_until_bar"] = bar_index + self.cfg.cooldown_bars

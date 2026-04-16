@@ -1,56 +1,15 @@
 # ============================================================
-# 量化交易系统 - 生产环境配置
+# Trader v2.3 配置文件
+#
+# v2.2 → v2.3 变更:
+#   - 删除 universe.intervals 中的 "1h" (全部亏损, 成本不可战胜)
+#   - 删除 strategy.regime 整段 (0 trades, 策略失效)
+#   - 修正 execution.slippage_bps (10 → 21/26, 基于 phase1 实测)
+#   - 新增 strategy.mean_reversion.trend_avoidance
+#   - 删除 MACD/TripleEMA v2.2 的过度拉伸过滤参数
+#   - triple_ema 降级为 enabled=false (样本不足)
 # ============================================================
 
-system:
-  name: "CryptoQuant Engine"
-  version: "3.0.0"
-  mode: "paper"                     # paper / live / backtest
-  log_level: "INFO"
-  timezone: "UTC"
-  paper_capital: 10000.0             # 模拟盘初始资金
-
-# ============================================================
-# 交易所连接
-# ============================================================
-exchange:
-  name: "binance"
-  api_key: "${BINANCE_API_KEY}"
-  api_secret: "${BINANCE_API_SECRET}"
-  testnet: false
-  # 若 REST 返回 HTTP 451「restricted location」：代理已通，需更换 Clash 节点到 Binance 允许的地区
-  base_url_live: "https://api.binance.com"
-  base_url_test: "https://testnet.binance.vision"
-  ws_url_live: "wss://stream.binance.com:9443/ws"
-  ws_url_test: "wss://testnet.binance.vision/ws"
-  # REST API 限流
-  rate_limit:
-    requests_per_minute: 1200
-    orders_per_second: 10
-    orders_per_day: 200000
-  # 请求重试
-  retry:
-    max_retries: 3
-    backoff_factor: 0.5
-    retry_on_status: [429, 500, 502, 503]
-  # 超时
-  timeout:
-    connect: 5
-    read: 15
-  # REST 走系统代理（如 Clash）
-  # - Windows 本机跑 Python：保留 url 即可（127.0.0.1:Clash 端口）
-  # - WSL 里跑 Python：设 wsl_clash_port 与 Clash HTTP 端口一致，并开启 Clash「Allow LAN」；
-  #   宿主机 IP 默认取 `ip route` 的 default via（勿用 resolv 里 10.255.255.254，该地址常无法连代理）
-  # - 自动仍失败时填写 wsl_host: "你的 Windows IP"（ipconfig 里 vEthernet WSL 对应网段）
-  # - url 留空时可依赖环境变量 HTTPS_PROXY / HTTP_PROXY
-  proxy:
-    url: "http://127.0.0.1:7890"
-    wsl_clash_port: 7890
-    wsl_host: ""
-
-# ============================================================
-# 交易标的
-# ============================================================
 universe:
   quote_currency: "USDT"
   symbols:
@@ -64,323 +23,140 @@ universe:
       qty_precision: 4
       price_precision: 2
       min_notional: 10.0
-    - symbol: "BNBUSDT"
-      min_qty: 0.001
-      qty_precision: 3
-      price_precision: 2
-      min_notional: 10.0
-    - symbol: "SOLUSDT"
-      min_qty: 0.01
-      qty_precision: 2
-      price_precision: 2
-      min_notional: 10.0
+    # SOL/BNB 已删除: v2.2 扩标的实验未经底层 edge 验证即引入
+    # 如需恢复, 必须先跑通路线 A 横截面 MVP 再考虑
+
+  intervals:
+    - "4h"
+    - "1d"
+    # "1h" 已删除: wf_mean_reversion_1h PnL -3015, wf_macd_1h PnL -790
+    #              在 42+ bps 双边成本下不可能有正 edge
+
+  history_days: 1825   # 5 年
 
 # ============================================================
-# 数据配置
-# ============================================================
-data:
-  database:
-    path: "data/quant.db"
-    wal_mode: true
-    cache_size_mb: 256
-    busy_timeout_ms: 5000
-  
-  # 历史数据 - 拉取全量
-  history:
-    # 与各 timeframe 的 retention_days 对齐；下载逻辑以 timeframes[].retention_days 为准
-    lookback_days: 2000
-    # 多时间框架（统一自 2021-01-01 起：约 1927 天至 2026-04-12，2000 天留余量）
-    timeframes:
-      - interval: "1m"
-        retention_days: 2000
-        batch_size: 1000
-      - interval: "5m"
-        retention_days: 2000
-        batch_size: 1000
-      - interval: "15m"
-        retention_days: 2000
-        batch_size: 1000
-      - interval: "1h"
-        retention_days: 2000
-        batch_size: 1000
-      - interval: "4h"
-        retention_days: 2000
-        batch_size: 1000
-      - interval: "1d"
-        retention_days: 2000
-        batch_size: 1000
-    # 增量更新间隔（秒）
-    update_intervals:
-      "1m": 60
-      "5m": 300
-      "15m": 900
-      "1h": 3600
-      "4h": 14400
-      "1d": 86400
-  
-  # 订单簿快照
-  orderbook:
-    enabled: true
-    depth: 20                    # 20档深度
-    snapshot_interval_ms: 1000   # 1秒一次快照
-
-# ============================================================
-# 因子与特征工程
+# 特征工程
 # ============================================================
 features:
-  # 特征计算回看窗口
-  lookback_windows: [5, 10, 20, 60, 120, 240, 480]
-  
-  # 启用的因子类别
-  factor_groups:
-    momentum: true       # 动量类因子
-    mean_reversion: true # 均值回归
-    volatility: true     # 波动率类
-    volume: true         # 量价类
-    microstructure: true # 微观结构
-    cross_sectional: true # 截面因子
-    regime: true         # 市场状态识别
-  
-  # 因子中性化
-  neutralize:
-    market_beta: true
-    sector: false        # 加密货币暂不做行业中性
+  lookback_windows:
+    - 5
+    - 10
+    - 20
+    - 60
+    - 120
+    - 240
+    - 480
+  indicators:
+    - macd
+    - rsi
+    - adx
+    - atr
+    - natr
+    - ema
+    - bollinger_bands
 
 # ============================================================
-# Alpha 模型
-# ============================================================
-alpha:
-  # 机器学习模型
-  ml:
-    model_type: "gradient_boosting"  # gradient_boosting / random_forest / ensemble
-    target: "forward_return_1h"       # 预测目标
-    target_periods: [1, 4, 24]        # 预测 1h / 4h / 24h 前瞻收益
-    
-    # 训练配置
-    train:
-      train_window_days: 180          # 训练窗口
-      validation_window_days: 30      # 验证窗口
-      retrain_interval_hours: 24      # 每24小时重新训练
-      purge_gap_hours: 6              # 训练/验证之间的间隔（防泄漏）
-      embargo_hours: 3                # embargo 期（防泄漏）
-      n_splits: 5                     # 时序交叉验证折数
-      
-    # 模型超参数
-    params:
-      gradient_boosting:
-        n_estimators: 500
-        max_depth: 5
-        learning_rate: 0.05
-        subsample: 0.8
-        min_samples_leaf: 50
-        max_features: 0.7
-      random_forest:
-        n_estimators: 300
-        max_depth: 8
-        min_samples_leaf: 30
-        max_features: "sqrt"
-    
-    # 特征选择
-    feature_selection:
-      method: "importance"           # importance / lasso / mutual_info
-      max_features: 50               # 最多保留 N 个特征
-      min_importance: 0.001
-    
-    # 信号阈值（预测概率）
-    signal_threshold:
-      buy: 0.55
-      sell: 0.55
-      strong_buy: 0.65
-      strong_sell: 0.65
-
-  # 信号合成
-  ensemble:
-    method: "weighted_vote"          # weighted_vote / stacking
-    weights:
-      ml_signal: 0.5
-      momentum_signal: 0.2
-      mean_reversion_signal: 0.15
-      regime_signal: 0.15
-
-# ============================================================
-# 组合优化
-# ============================================================
-portfolio:
-  optimization:
-    method: "risk_parity"            # equal_weight / mean_variance / risk_parity / max_sharpe
-    rebalance_interval_hours: 4
-    
-  constraints:
-    max_weight_per_asset: 0.35       # 单标的最大权重
-    min_weight_per_asset: 0.0
-    max_turnover_daily: 2.0          # 每日最大换手率
-    target_volatility: 0.15          # 年化目标波动率 15%
-
-# ============================================================
-# 执行引擎
-# ============================================================
-execution:
-  # 执行算法
-  algo: "market"                     # 小资金默认直接成交，避免 TWAP 过度复杂
-  
-  twap:
-    total_slices: 5                  # 拆分为 N 个子单
-    interval_seconds: 60             # 每个子单间隔
-    max_deviation_pct: 0.002         # 价格偏离阈值
-  
-  vwap:
-    participation_rate: 0.1          # 参与率不超过 10% 成交量
-    lookback_bars: 20
-    
-  iceberg:
-    show_qty_pct: 0.2               # 每次只露出 20% 的量
-    random_factor: 0.3              # 随机化因子
-  
-  # 滑点模型
-  slippage:
-    model: "linear"                 # fixed / linear / sqrt
-    base_bps: 2                     # 基础滑点 2bps
-    impact_coefficient: 0.1         # 冲击成本系数
-  
-  # 手续费
-  commission:
-    maker_rate: 0.0002              # Maker 0.02%（VIP 费率）
-    taker_rate: 0.0004              # Taker 0.04%
-    use_bnb_discount: true          # BNB 抵扣 25%
-
-# ============================================================
-# 风控体系
-# ============================================================
-risk:
-  # ----- 交易前检查（Pre-trade） -----
-  pre_trade:
-    max_single_order_notional: 5000      # 单笔最大名义金额 USDT
-    max_single_order_pct: 0.10           # 单笔最大占总资产比例
-    min_order_interval_seconds: 5        # 最小下单间隔
-    max_orders_per_minute: 10
-    max_orders_per_hour: 60
-    price_deviation_limit_pct: 0.02      # 下单价不能偏离市价超过2%
-    
-  # ----- 持仓风控（Position-level） -----
-  position:
-    max_position_pct: 0.25               # 单标的最大仓位
-    max_total_exposure_pct: 0.80         # 总敞口上限
-    max_concentration: 0.40              # 最大集中度（单标的/总仓位）
-    stop_loss_pct: 0.03                  # 止损 3%
-    trailing_stop_pct: 0.05              # 移动止损 5%
-    take_profit_pct: 0.08                # 止盈 8%
-    max_holding_hours: 168               # 最长持仓时间 7天
-
-  # ----- 组合风控（Portfolio-level） -----
-  portfolio:
-    max_daily_loss_pct: 0.03             # 日内最大亏损 3%
-    max_weekly_loss_pct: 0.06            # 周最大亏损 6%
-    max_drawdown_pct: 0.12               # 最大回撤 12%
-    max_daily_turnover: 3.0              # 日最大换手
-    max_correlation_between_positions: 0.7
-    var_limit_pct: 0.05                  # VaR 限额（95%置信度）
-    var_confidence: 0.95
-    var_horizon_hours: 24
-
-  # ----- 熔断 -----
-  circuit_breaker:
-    daily_loss_trigger_pct: 0.04         # 日亏4%触发
-    drawdown_trigger_pct: 0.15           # 回撤15%触发
-    consecutive_losses: 5                # 连续亏损5笔
-    cooldown_hours: 4                    # 熔断冷却期
-    auto_liquidate: false                # 是否自动清仓
-
-# ============================================================
-# 规则策略主线
+# 策略配置
 # ============================================================
 strategy:
-  name: "triple_ema"               # triple_ema / macd_momentum / regime
-
-  common:
-    primary_interval: "4h"
-    higher_interval: "1d"
-    commission_pct: 0.001
-    slippage_pct: 0.001
-    min_trade_value: 12.0
+  # ---- 规则策略 (v2.3 回滚 + 改进) ----
+  macd_momentum:
+    enabled: true
+    min_adx: 20.0
+    stop_atr_mult: 2.0
+    trail_atr_mult: 2.8
+    risk_per_trade: 0.02
+    cooldown_bars: 3
+    # 已删除 (v2.2 → v2.3):
+    #   min_rsi, max_rsi            - sensitivity good_ratio=0
+    #   max_holding_bars            - sensitivity good_ratio=0
+    #   zscore / ma_dev / keltner 过滤器 - 三层过度拉伸过滤, 过拟合
 
   triple_ema:
-    min_adx: 18.0
-    min_rsi: 45.0
-    max_rsi: 72.0
-    min_volume_ratio: 0.90
-    pullback_min_atr: -0.90
-    pullback_max_atr: 0.60
+    enabled: false   # 样本不足 (11 trades/33 folds), 降级为候选
+    ema_short: 20
+    ema_medium: 50
+    ema_long: 200
+    min_adx: 20.0
+    stop_atr_mult: 1.8
     trail_atr_mult: 2.8
-    stop_atr_mult: 2.0
-    ema_stop_buffer_atr: 0.5
-    max_holding_bars: 45
-    cooldown_bars: 6
-    risk_per_trade: 0.015
-    max_position_pct: 0.50
+    risk_per_trade: 0.02
+    cooldown_bars: 3
 
-  macd_momentum:
-    min_adx: 16.0
-    min_rsi: 48.0
-    max_rsi: 74.0
-    min_volume_ratio: 0.90
-    trail_atr_mult: 2.5
-    stop_atr_mult: 2.0
-    max_holding_bars: 36
-    cooldown_bars: 5
-    risk_per_trade: 0.012
-    max_position_pct: 0.45
-
-  regime:
-    allow_weak_regime: false
-    rsi_low: 45.0
-    rsi_high: 68.0
-    adx_min: 20.0
-    adx_min_weak: 24.0
-    dist_ema_min_atr: -1.0
-    dist_ema_max_atr: 0.70
-    vol_ratio_min: 0.90
-    trailing_atr_mult: 2.8
-    take_profit_atr_mult: 6.0
-    stop_atr_mult: 2.0
-    max_holding_bars: 40
-    time_stop_min_profit: 0.010
-    risk_per_trade: 0.012
-    risk_per_trade_weak: 0.006
-    max_position_pct: 0.40
-    cooldown_bars: 6
-
-
-# ============================================================
-# 监控告警
-# ============================================================
-monitoring:
-  # 健康检查间隔
-  heartbeat_seconds: 30
-  
-  # Telegram
-  telegram:
-    enabled: false
-    bot_token: "${TELEGRAM_BOT_TOKEN}"
-    chat_id: "${TELEGRAM_CHAT_ID}"
-    # 告警级别过滤
-    min_level: "WARNING"               # DEBUG / INFO / WARNING / CRITICAL
-  
-  # 指标上报
-  metrics:
+  mean_reversion:
     enabled: true
-    report_interval_seconds: 60
-    
-  # 告警规则
-  alerts:
-    - name: "high_drawdown"
-      condition: "drawdown_pct > 0.08"
-      level: "WARNING"
-    - name: "extreme_drawdown"
-      condition: "drawdown_pct > 0.12"
-      level: "CRITICAL"
-    - name: "position_limit_breach"
-      condition: "max_position_pct > 0.30"
-      level: "WARNING"
-    - name: "api_latency_high"
-      condition: "api_latency_ms > 2000"
-      level: "WARNING"
+    bb_period: 20
+    bb_std: 2.0
+    rsi_period: 14
+    rsi_oversold: 30.0
+    rsi_overbought: 70.0
+    stop_atr_mult: 2.0
+    target_pct: 0.03
+    max_holding_bars: 24
+    risk_per_trade: 0.015
+    cooldown_bars: 2
+    # ---- v2.3 新增: 趋势回避门 ----
+    trend_avoidance:
+      max_adx_for_entry: 28.0
+      monotonic_lookback: 20
+      max_monotonic_ratio: 0.85
+
+  # ---- 路线 A: 横截面因子模型 (MVP 实验) ----
+  cross_sectional_momentum:
+    enabled: false   # 独立入口, 不进常规 walkforward
+    top_n: 50
+    momentum_window: 30
+    reversal_window: 7
+    volatility_window: 30
+    liquidity_window: 30
+    long_pct: 0.20
+    short_pct: 0.20
+    rebalance_freq_days: 7
+    use_inverse_vol_weight: true
+    vol_target_annual: 0.20
+    factor_weights:
+      momentum_30d: 1.0
+      reversal_7d: -0.3
+      volatility_30d: -0.5
+      liquidity_amihud: -0.3
+      size_proxy: 0.3
+
+  # ---- 已删除的策略 ----
+  # regime:
+  #   v2.2 实测 0 trades / 33 folds, 过滤器叠加导致完全不入场, 策略失效
+  #   文件 alpha/regime_adaptive_strategy.py 已归档到 archive/v22_deprecated/
+
+# ============================================================
+# 执行 / 成本 (v2.3 修正)
+# ============================================================
+execution:
+  slippage_bps:
+    BTCUSDT: 21      # phase1 实测: 20.89 bps (v2.2 假设 10, 系统性低估)
+    ETHUSDT: 26      # phase1 实测: 25.81 bps
+    default: 25      # 其他标的保守估计
+  commission_bps: 10    # 币安现货 VIP0 吃单
+
+# ============================================================
+# Walk-Forward 验证参数
+# ============================================================
+walkforward:
+  train_days: 360
+  test_days: 60
+  purge_days: 2         # v2.3 新增: Purged WF 的 embargo (López de Prado)
+  min_trades_per_fold: 3
+
+# ============================================================
+# ML 模块 (可选)
+# ============================================================
+ml:
+  enabled: false        # MVP 阶段不用 ML 过滤
+  model: "lightgbm"
+  forward_bars: 6
+  min_probability: 0.55
+
+# ============================================================
+# 日志
+# ============================================================
+logging:
+  level: "INFO"
+  file: "logs/trader.log"

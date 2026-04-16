@@ -1,0 +1,310 @@
+alpha:
+  ensemble:
+    method: weighted_vote
+    weights:
+      mean_reversion_signal: 0.15
+      ml_signal: 0.5
+      momentum_signal: 0.2
+      regime_signal: 0.15
+  ml:
+    feature_selection:
+      max_features: 50
+      method: importance
+      min_importance: 0.001
+    model_type: gradient_boosting
+    params:
+      gradient_boosting:
+        learning_rate: 0.05
+        max_depth: 5
+        max_features: 0.7
+        min_samples_leaf: 50
+        n_estimators: 500
+        subsample: 0.8
+      random_forest:
+        max_depth: 8
+        max_features: sqrt
+        min_samples_leaf: 30
+        n_estimators: 300
+    signal_threshold:
+      buy: 0.55
+      sell: 0.55
+      strong_buy: 0.65
+      strong_sell: 0.65
+    target: forward_return_1h
+    target_periods:
+    - 1
+    - 4
+    - 24
+    train:
+      embargo_hours: 3
+      n_splits: 5
+      purge_gap_hours: 6
+      retrain_interval_hours: 24
+      train_window_days: 180
+      validation_window_days: 30
+data:
+  database:
+    busy_timeout_ms: 5000
+    cache_size_mb: 256
+    path: data/quant.db
+    wal_mode: true
+  history:
+    lookback_days: 2000
+    timeframes:
+    - batch_size: 1000
+      interval: 1m
+      retention_days: 2000
+    - batch_size: 1000
+      interval: 5m
+      retention_days: 2000
+    - batch_size: 1000
+      interval: 15m
+      retention_days: 2000
+    - batch_size: 1000
+      interval: 1h
+      retention_days: 2000
+    - batch_size: 1000
+      interval: 4h
+      retention_days: 2000
+    - batch_size: 1000
+      interval: 1d
+      retention_days: 2000
+    update_intervals:
+      15m: 900
+      1d: 86400
+      1h: 3600
+      1m: 60
+      4h: 14400
+      5m: 300
+  orderbook:
+    depth: 20
+    enabled: true
+    snapshot_interval_ms: 1000
+exchange:
+  api_key: ${BINANCE_API_KEY}
+  api_secret: ${BINANCE_API_SECRET}
+  base_url_live: https://api.binance.com
+  base_url_test: https://testnet.binance.vision
+  name: binance
+  proxy:
+    url: http://127.0.0.1:7890
+    wsl_clash_port: 7890
+    wsl_host: ''
+  rate_limit:
+    orders_per_day: 200000
+    orders_per_second: 10
+    requests_per_minute: 1200
+  retry:
+    backoff_factor: 0.5
+    max_retries: 3
+    retry_on_status:
+    - 429
+    - 500
+    - 502
+    - 503
+  testnet: false
+  timeout:
+    connect: 5
+    read: 15
+  ws_url_live: wss://stream.binance.com:9443/ws
+  ws_url_test: wss://testnet.binance.vision/ws
+execution:
+  algo: market
+  commission:
+    maker_rate: 0.0002
+    taker_rate: 0.0004
+    use_bnb_discount: true
+  iceberg:
+    random_factor: 0.3
+    show_qty_pct: 0.2
+  slippage:
+    base_bps: 5
+    impact_coefficient: 0.2
+    model: linear
+  twap:
+    interval_seconds: 60
+    max_deviation_pct: 0.002
+    total_slices: 5
+  vwap:
+    lookback_bars: 20
+    participation_rate: 0.1
+features:
+  factor_groups:
+    cross_sectional: true
+    mean_reversion: true
+    microstructure: true
+    momentum: true
+    regime: true
+    volatility: true
+    volume: true
+  lookback_windows:
+  - 5
+  - 10
+  - 20
+  - 60
+  - 120
+  - 240
+  - 480
+  neutralize:
+    market_beta: true
+    sector: false
+monitoring:
+  alerts:
+  - condition: drawdown_pct > 0.08
+    level: WARNING
+    name: high_drawdown
+  - condition: drawdown_pct > 0.12
+    level: CRITICAL
+    name: extreme_drawdown
+  - condition: max_position_pct > 0.30
+    level: WARNING
+    name: position_limit_breach
+  - condition: api_latency_ms > 2000
+    level: WARNING
+    name: api_latency_high
+  heartbeat_seconds: 30
+  metrics:
+    enabled: true
+    report_interval_seconds: 60
+  telegram:
+    bot_token: ${TELEGRAM_BOT_TOKEN}
+    chat_id: ${TELEGRAM_CHAT_ID}
+    enabled: false
+    min_level: WARNING
+portfolio:
+  constraints:
+    max_turnover_daily: 2.0
+    max_weight_per_asset: 0.35
+    min_weight_per_asset: 0.0
+    target_volatility: 0.15
+  optimization:
+    method: risk_parity
+    rebalance_interval_hours: 4
+risk:
+  circuit_breaker:
+    auto_liquidate: false
+    consecutive_losses: 5
+    cooldown_hours: 4
+    daily_loss_trigger_pct: 0.04
+    drawdown_trigger_pct: 0.15
+  portfolio:
+    max_correlation_between_positions: 0.7
+    max_daily_loss_pct: 0.03
+    max_daily_turnover: 3.0
+    max_drawdown_pct: 0.12
+    max_weekly_loss_pct: 0.06
+    var_confidence: 0.95
+    var_horizon_hours: 24
+    var_limit_pct: 0.05
+  position:
+    max_concentration: 0.4
+    max_holding_hours: 168
+    max_position_pct: 0.25
+    max_total_exposure_pct: 0.8
+    stop_loss_pct: 0.03
+    take_profit_pct: 0.08
+    trailing_stop_pct: 0.05
+  pre_trade:
+    max_orders_per_hour: 60
+    max_orders_per_minute: 10
+    max_single_order_notional: 5000
+    max_single_order_pct: 0.1
+    min_order_interval_seconds: 5
+    price_deviation_limit_pct: 0.02
+strategy:
+  common:
+    commission_pct: 0.001
+    higher_interval: 1d
+    min_trade_value: 12.0
+    primary_interval: 4h
+    slippage_pct: 0.0021
+  macd_momentum:
+    cooldown_bars: 5
+    cooldown_bars_after_stop: 8
+    max_holding_bars: 36
+    max_position_pct: 0.45
+    max_rsi: 74.0
+    min_adx: 16.0
+    min_rsi: 48.0
+    min_volume_ratio: 0.9
+    regime_adx_min: 22.0
+    regime_gate_enabled: true
+    risk_per_trade: 0.012
+    slippage_pct: 0.0021
+    stop_atr_mult: 2.0
+    trail_atr_base: 2.5
+    trail_atr_mult: 2.5
+    trail_max_mult: 5.0
+    trail_min_mult: 1.8
+    trail_profit_bonus: 0.3
+  name: triple_ema
+  regime:
+    adx_min: 20.0
+    adx_min_weak: 24.0
+    allow_weak_regime: false
+    cooldown_bars: 6
+    dist_ema_max_atr: 0.7
+    dist_ema_min_atr: -1.0
+    max_holding_bars: 40
+    max_position_pct: 0.4
+    risk_per_trade: 0.012
+    risk_per_trade_weak: 0.006
+    rsi_high: 68.0
+    rsi_low: 45.0
+    slippage_pct: 0.0021
+    stop_atr_mult: 2.0
+    take_profit_atr_mult: 6.0
+    time_stop_min_profit: 0.01
+    trailing_atr_mult: 2.8
+    vol_ratio_min: 0.9
+  triple_ema:
+    cooldown_bars: 6
+    ema_stop_buffer_atr: 0.5
+    max_holding_bars: 45
+    max_position_pct: 0.5
+    max_rsi: 72.0
+    min_adx: 18.0
+    min_rsi: 45.0
+    min_volume_ratio: 0.85
+    pullback_max_atr: 0.8
+    pullback_min_atr: -1.2
+    regime_adx_min: 25.0
+    regime_gate_enabled: true
+    risk_per_trade: 0.015
+    slippage_pct: 0.0021
+    stop_atr_mult: 2.0
+    trail_atr_base: 2.8
+    trail_atr_mult: 2.8
+    trail_max_mult: 5.0
+    trail_min_mult: 2.0
+    trail_profit_bonus: 0.3
+system:
+  log_level: INFO
+  mode: paper
+  name: CryptoQuant Engine
+  paper_capital: 10000.0
+  timezone: UTC
+  version: 3.0.0
+universe:
+  quote_currency: USDT
+  symbols:
+  - min_notional: 10.0
+    min_qty: 1.0e-05
+    price_precision: 2
+    qty_precision: 5
+    symbol: BTCUSDT
+  - min_notional: 10.0
+    min_qty: 0.0001
+    price_precision: 2
+    qty_precision: 4
+    symbol: ETHUSDT
+  - min_notional: 10.0
+    min_qty: 0.001
+    price_precision: 2
+    qty_precision: 3
+    symbol: BNBUSDT
+  - min_notional: 10.0
+    min_qty: 0.01
+    price_precision: 2
+    qty_precision: 2
+    symbol: SOLUSDT

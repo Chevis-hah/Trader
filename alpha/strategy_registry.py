@@ -1,13 +1,11 @@
 """
-统一策略注册表
+统一策略注册表 — v2.2
 
-职责：
-- 按配置/CLI 选择策略
-- 统一读取策略参数
-- 给回测和实盘提供同一份策略实例
+新增:
+- MeanReversionStrategy 注册
+- GridTradingStrategy 注册
 """
 from __future__ import annotations
-
 from dataclasses import fields
 from typing import Any, Type
 
@@ -15,35 +13,45 @@ from config.loader import Config, load_config
 from alpha.regime_strategy import RegimeAdaptiveStrategy, RegimeStrategyConfig
 from alpha.triple_ema_strategy import TripleEMAStrategy, TripleEMAStrategyConfig
 from alpha.macd_momentum_strategy import MACDMomentumStrategy, MACDMomentumStrategyConfig
+from alpha.mean_reversion_strategy import MeanReversionStrategy, MeanReversionConfig
+
+try:
+    from alpha.grid_strategy import GridTradingStrategy
+    _GRID_AVAILABLE = True
+except ImportError:
+    _GRID_AVAILABLE = False
 
 
 STRATEGY_MAP: dict[str, tuple[type, Type]] = {
     "regime": (RegimeAdaptiveStrategy, RegimeStrategyConfig),
     "triple_ema": (TripleEMAStrategy, TripleEMAStrategyConfig),
     "macd_momentum": (MACDMomentumStrategy, MACDMomentumStrategyConfig),
+    "mean_reversion": (MeanReversionStrategy, MeanReversionConfig),
 }
+
+SIMPLE_STRATEGIES = {}
+if _GRID_AVAILABLE:
+    SIMPLE_STRATEGIES["grid"] = GridTradingStrategy
 
 
 def available_strategies() -> list[str]:
-    return sorted(STRATEGY_MAP.keys())
+    return sorted(list(STRATEGY_MAP.keys()) + list(SIMPLE_STRATEGIES.keys()))
 
 
-def resolve_strategy_name(config: Config | dict | None = None, explicit_name: str | None = None) -> str:
+def resolve_strategy_name(config=None, explicit_name=None) -> str:
     if explicit_name:
         name = explicit_name.strip().lower()
     elif config is not None and not isinstance(config, dict) and hasattr(config, "get_nested"):
         name = str(config.get_nested("strategy.name", "triple_ema")).strip().lower()
     else:
         name = "triple_ema"
-
-    if name not in STRATEGY_MAP:
-        raise ValueError(
-            f"未知策略: {name}. 可选值: {', '.join(available_strategies())}"
-        )
+    all_names = set(STRATEGY_MAP.keys()) | set(SIMPLE_STRATEGIES.keys())
+    if name not in all_names:
+        raise ValueError(f"未知策略: {name}. 可选: {', '.join(available_strategies())}")
     return name
 
 
-def _config_section_to_dict(section: Any) -> dict[str, Any]:
+def _config_section_to_dict(section):
     if section is None:
         return {}
     if hasattr(section, "_data"):
@@ -53,14 +61,12 @@ def _config_section_to_dict(section: Any) -> dict[str, Any]:
     return {}
 
 
-def _build_cfg(config_cls: Type, raw_dict: dict[str, Any]):
+def _build_cfg(config_cls, raw_dict):
     allowed = {f.name for f in fields(config_cls)}
-    kwargs = {k: v for k, v in raw_dict.items() if k in allowed}
-    return config_cls(**kwargs)
+    return config_cls(**{k: v for k, v in raw_dict.items() if k in allowed})
 
 
-def _yaml_strategy_params(strategy_name: str) -> dict[str, Any]:
-    """从默认 settings.yaml 读取策略段，供 dict 覆盖时做底稿。"""
+def _yaml_strategy_params(strategy_name):
     try:
         base_cfg = load_config()
         common = _config_section_to_dict(base_cfg.get_nested("strategy.common", {}))
@@ -72,12 +78,13 @@ def _yaml_strategy_params(strategy_name: str) -> dict[str, Any]:
         return {}
 
 
-def build_strategy(config: Config | dict | None = None, explicit_name: str | None = None):
+def build_strategy(config=None, explicit_name=None):
     name = resolve_strategy_name(config, explicit_name)
+    if name in SIMPLE_STRATEGIES:
+        return SIMPLE_STRATEGIES[name]()
+
     strategy_cls, cfg_cls = STRATEGY_MAP[name]
-
-    raw_cfg: dict[str, Any] = _yaml_strategy_params(name)
-
+    raw_cfg = _yaml_strategy_params(name)
     if isinstance(config, dict):
         raw_cfg = {**raw_cfg, **config}
     elif config is not None:
@@ -85,5 +92,4 @@ def build_strategy(config: Config | dict | None = None, explicit_name: str | Non
         common = _config_section_to_dict(config.get_nested("strategy.common", {}))
         raw_cfg = {**raw_cfg, **common, **spec}
 
-    cfg = _build_cfg(cfg_cls, raw_cfg)
-    return strategy_cls(cfg)
+    return strategy_cls(_build_cfg(cfg_cls, raw_cfg))

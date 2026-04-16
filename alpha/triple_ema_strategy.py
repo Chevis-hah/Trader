@@ -1,256 +1,174 @@
 """
-低频 4h 趋势跟随策略：Triple EMA Pullback
+Triple EMA Strategy — v2.3 (回滚至 v2.0，候选策略，不单独上线)
 
-设计目标：
-- 只做强趋势中的回踩修复
-- 通过 1d 高级别过滤，避免在大级别走弱时抄底
-- 降低交易频率，减少被震荡磨损
+变更历史:
+  v2.0: 三 EMA 顺排 + ADX 过滤 → 33 folds 仅 11 trades
+  v2.2: + 过度拉伸过滤 → 样本仍不足 (11 trades, fold WR 15.2%)
+  v2.3: 回滚到 v2.0，标记为 enabled=false，仅作候选
+
+失效证据:
+  - wf_triple_ema_4h.json: 11 trades / 33 folds, fold WR 15.2%
+  - 虽 OOS PnL +1519, 但完全由 2-3 笔极端赢家驱动
+  - sensitivity_triple_ema.json 显示 good_ratio=1.0，但这是因为样本太少参数空间"看起来平"
+
+本策略在 v2.3 中默认 disabled。
+保留文件供未来若 universe 扩到 30+ 标的后重新评估。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 from utils.logger import get_logger
 
-logger = get_logger("triple_ema_strategy")
+logger = get_logger("triple_ema")
 
 
 @dataclass
-class TripleEMAStrategyConfig:
-    primary_interval: str = "4h"
-    higher_interval: str = "1d"
+class TripleEMAConfig:
+    """v2.3 回滚版配置"""
+    # EMA 周期
+    ema_short: int = 20
+    ema_medium: int = 50
+    ema_long: int = 200
 
-    ema_fast: int = 8
-    ema_mid: int = 21
-    ema_slow: int = 55
-    daily_fast: int = 20
-    daily_slow: int = 50
+    # 入场过滤
+    min_adx: float = 20.0
 
-    min_adx: float = 18.0
-    max_rsi: float = 72.0
-    min_rsi: float = 45.0
-    min_volume_ratio: float = 0.90
-
-    pullback_min_atr: float = -0.90
-    pullback_max_atr: float = 0.60
-
+    # 止损
+    stop_atr_mult: float = 1.8
     trail_atr_mult: float = 2.8
-    stop_atr_mult: float = 2.0
-    ema_stop_buffer_atr: float = 0.5
-    max_holding_bars: int = 45
-    cooldown_bars: int = 6
 
-    risk_per_trade: float = 0.015
-    max_position_pct: float = 0.50
-    min_trade_value: float = 12.0
+    # 仓位
+    risk_per_trade: float = 0.02
+    cooldown_bars: int = 3
 
-    commission_pct: float = 0.001
-    slippage_pct: float = 0.001
+    # ---- 已删除 (v2.2 → v2.3) ----
+    # zscore_threshold          — 过度拉伸过滤，统计无意义
+    # ma_dev_threshold          — 同上
+    # keltner_threshold         — 同上
+    # max_holding_bars          — good_ratio 低
 
 
 class TripleEMAStrategy:
-    name = "triple_ema"
-    display_name = "TripleEMA Pullback"
+    """
+    三 EMA 顺排趋势策略 v2.3
 
-    def __init__(self, cfg: Optional[TripleEMAStrategyConfig] = None):
-        self.cfg = cfg or TripleEMAStrategyConfig()
+    核心逻辑:
+      1. EMA20 > EMA50 > EMA200 (多头排列)
+      2. 收盘价上穿 EMA20 (入场触发)
+      3. ADX >= min_adx
+      4. ATR 止损 + 跟踪
+    """
 
-    @property
-    def primary_interval(self) -> str:
-        return self.cfg.primary_interval
-
-    @property
-    def higher_interval(self) -> str:
-        return self.cfg.higher_interval
+    def __init__(self, config: Optional[TripleEMAConfig] = None):
+        self.cfg = config or TripleEMAConfig()
 
     def prepare_features(
         self,
         features: pd.DataFrame,
-        higher_features: Optional[pd.DataFrame] = None,
+        higher_tf: Optional[pd.DataFrame] = None,
     ) -> pd.DataFrame:
-        feat = features.copy()
+        """
+        计算 EMA 指标 (假设 FeatureEngine 可能没算三条)
+        """
+        df = features.copy()
 
-        if "close" not in feat.columns:
-            raise ValueError("features 缺少 close 列")
+        for period in [self.cfg.ema_short, self.cfg.ema_medium, self.cfg.ema_long]:
+            col = f"ema_{period}"
+            if col not in df.columns and "close" in df.columns:
+                df[col] = df["close"].ewm(span=period, adjust=False).mean()
 
-        close = pd.to_numeric(feat["close"], errors="coerce")
-        feat["ema_8"] = close.ewm(span=self.cfg.ema_fast, adjust=False).mean()
-        feat["ema_21"] = close.ewm(span=self.cfg.ema_mid, adjust=False).mean()
-        feat["ema_55"] = close.ewm(span=self.cfg.ema_slow, adjust=False).mean()
-
-        if "rel_volume_20" not in feat.columns:
-            feat["rel_volume_20"] = 1.0
-
-        if higher_features is not None and not higher_features.empty:
-            hf = higher_features.copy()
-            hf["ht_ema_fast"] = pd.to_numeric(hf["close"], errors="coerce").ewm(
-                span=self.cfg.daily_fast, adjust=False
-            ).mean()
-            hf["ht_ema_slow"] = pd.to_numeric(hf["close"], errors="coerce").ewm(
-                span=self.cfg.daily_slow, adjust=False
-            ).mean()
-            hf["daily_trend_ok"] = (
-                (pd.to_numeric(hf["close"], errors="coerce") > hf["ht_ema_fast"])
-                & (hf["ht_ema_fast"] > hf["ht_ema_slow"])
-            ).astype(float)
-
-            keep_cols = ["open_time", "ht_ema_fast", "ht_ema_slow", "daily_trend_ok"]
-            feat = pd.merge_asof(
-                feat.sort_values("open_time"),
-                hf[keep_cols].sort_values("open_time"),
-                on="open_time",
-                direction="backward",
-            )
-        else:
-            feat["daily_trend_ok"] = 1.0
-
-        return feat
+        return df
 
     def should_enter(
-        self,
-        row: pd.Series,
-        prev_row: Optional[pd.Series],
-        state: Optional[dict] = None,
+        self, row: pd.Series, prev: pd.Series, state: dict
     ) -> bool:
-        state = state or {}
-
-        close = float(row.get("close", 0) or 0)
-        e8 = row.get("ema_8")
-        e21 = row.get("ema_21")
-        e55 = row.get("ema_55")
-        adx = row.get("adx_14")
-        rsi = row.get("rsi_14")
-        natr = row.get("natr_20")
-        vol_ratio = row.get("rel_volume_20", 1.0)
-        daily_ok = row.get("daily_trend_ok", 1.0)
-
-        if close <= 0 or any(pd.isna(v) for v in [e8, e21, e55, adx, rsi, natr]):
-            return False
-        if natr <= 0:
-            return False
-        if daily_ok < 0.5:
-            return False
-
-        # 趋势必须足够整齐
-        if not (e8 > e21 > e55):
-            return False
-        if adx < self.cfg.min_adx:
-            return False
-        if rsi < self.cfg.min_rsi or rsi > self.cfg.max_rsi:
-            return False
-        if pd.notna(vol_ratio) and vol_ratio < self.cfg.min_volume_ratio:
-            return False
-
-        atr = natr * close
-        if atr <= 0:
-            return False
-
-        # 只做回踩后重新站回 EMA21
-        if prev_row is None:
-            return False
-        prev_close = float(prev_row.get("close", close) or close)
-        prev_e21 = prev_row.get("ema_21")
-        prev_e8 = prev_row.get("ema_8")
-
-        if pd.isna(prev_e21) or pd.isna(prev_e8):
-            return False
-
-        dist_atr = (close - e21) / atr
-        if dist_atr < self.cfg.pullback_min_atr or dist_atr > self.cfg.pullback_max_atr:
-            return False
-
-        recovered = prev_close <= prev_e21 * 1.003 and close > e21
-        fast_reclaim = prev_close < prev_e8 and close > e8
-        momentum_ok = row.get("macd_hist", 0) > 0
-
-        if not ((recovered or fast_reclaim) and momentum_ok):
-            return False
-
+        """入场判断 (v2.0 纯规则)"""
         cooldown_until = state.get("cooldown_until_bar", -1)
-        current_bar = state.get("bar_index", 0)
-        if current_bar <= cooldown_until:
+        if state.get("bar_index", 0) < cooldown_until:
+            return False
+
+        ema_s = row.get(f"ema_{self.cfg.ema_short}")
+        ema_m = row.get(f"ema_{self.cfg.ema_medium}")
+        ema_l = row.get(f"ema_{self.cfg.ema_long}")
+        close = row.get("close")
+        prev_close = prev.get("close")
+        prev_ema_s = prev.get(f"ema_{self.cfg.ema_short}")
+
+        if any(pd.isna(x) for x in [ema_s, ema_m, ema_l, close, prev_close, prev_ema_s]):
+            return False
+
+        # 多头排列
+        if not (ema_s > ema_m > ema_l):
+            return False
+
+        # 价格上穿 EMA20
+        if not (prev_close <= prev_ema_s and close > ema_s):
+            return False
+
+        # ADX 过滤
+        adx = row.get("adx_14", 0)
+        if pd.isna(adx) or adx < self.cfg.min_adx:
             return False
 
         return True
 
-    def calc_position(self, equity: float, entry_price: float, row: pd.Series) -> tuple[float, float]:
+    def check_exit(
+        self,
+        row: pd.Series,
+        prev: pd.Series,
+        position: dict,
+        bar_count: int,
+    ) -> tuple[bool, str]:
+        close = float(row.get("close", 0) or 0)
+        if close <= 0:
+            return False, ""
+
+        stop_loss = position.get("stop_loss", 0)
+        if stop_loss > 0 and close <= stop_loss:
+            return True, "stop_loss"
+
+        highest = position.get("highest_since_entry", close)
+        atr_at_entry = position.get("atr_at_entry", 0)
+        if atr_at_entry > 0:
+            trail_stop = highest - self.cfg.trail_atr_mult * atr_at_entry
+            if close <= trail_stop:
+                return True, "trail_stop"
+
+        # EMA 排列破坏则退出
+        ema_s = row.get(f"ema_{self.cfg.ema_short}")
+        ema_m = row.get(f"ema_{self.cfg.ema_medium}")
+        if not pd.isna(ema_s) and not pd.isna(ema_m) and ema_s < ema_m:
+            return True, "ema_cross_down"
+
+        return False, ""
+
+    def calc_position(
+        self, available_capital: float, entry_price: float, row: pd.Series
+    ) -> tuple[float, float]:
         natr = float(row.get("natr_20", 0) or 0)
-        e55 = float(row.get("ema_55", entry_price) or entry_price)
-        if natr <= 0 or entry_price <= 0:
+        if natr <= 0:
             return 0.0, 0.0
 
-        atr = natr * entry_price
-        stop_from_atr = entry_price - self.cfg.stop_atr_mult * atr
-        stop_from_trend = e55 - self.cfg.ema_stop_buffer_atr * atr
-        stop_loss = max(stop_from_atr, stop_from_trend)
+        atr_price = natr * entry_price
+        stop_loss = entry_price - self.cfg.stop_atr_mult * atr_price
+        if stop_loss <= 0:
+            return 0.0, 0.0
 
         risk_per_unit = entry_price - stop_loss
         if risk_per_unit <= 0:
             return 0.0, 0.0
 
-        risk_amount = equity * self.cfg.risk_per_trade
-        qty = risk_amount / risk_per_unit
-
-        max_value = equity * self.cfg.max_position_pct
-        position_value = qty * entry_price
-        if position_value > max_value:
-            qty = max_value / entry_price
-
-        if qty * entry_price < self.cfg.min_trade_value:
-            return 0.0, 0.0
+        risk_budget = available_capital * self.cfg.risk_per_trade
+        qty = risk_budget / risk_per_unit
+        max_qty = available_capital / entry_price * 0.95
+        qty = min(qty, max_qty)
 
         return qty, stop_loss
 
-    def check_exit(
-        self,
-        row: pd.Series,
-        prev_row: Optional[pd.Series],
-        position: dict,
-        bar_count: int,
-    ) -> tuple[bool, str]:
-        close = float(row.get("close", 0) or 0)
-        natr = float(row.get("natr_20", 0) or 0)
-        e8 = row.get("ema_8")
-        e21 = row.get("ema_21")
-        daily_ok = row.get("daily_trend_ok", 1.0)
-
-        if close <= 0:
-            return False, ""
-
-        atr = natr * close if natr > 0 else position.get("atr_at_entry", 0.0)
-        highest = position.get("highest_since_entry", close)
-        init_stop = position.get("stop_loss", 0.0)
-
-        if atr > 0:
-            trailing = max(init_stop, highest - self.cfg.trail_atr_mult * atr)
-            if close <= trailing:
-                return True, "trailing_stop"
-
-        if pd.notna(e8) and pd.notna(e21) and e8 < e21:
-            return True, "ema_cross"
-
-        if daily_ok < 0.5 and close < e21:
-            return True, "daily_trend_break"
-
-        if bar_count >= self.cfg.max_holding_bars and close < position["entry_price"] * 1.01:
-            return True, "time_stop"
-
-        return False, ""
-
-    def on_trade_closed(self, state: dict, bar_index: int, reason: str):
-        if reason in {"trailing_stop", "ema_cross", "daily_trend_break", "time_stop"}:
-            state["cooldown_until_bar"] = bar_index + self.cfg.cooldown_bars
-
-    def signal_metadata(self, row: pd.Series) -> dict:
-        return {
-            "tag": "pullback_long",
-            "strength": float(min(max(row.get("adx_14", 0) / 40.0, 0.0), 1.0)),
-            "context": {
-                "rsi": round(float(row.get("rsi_14", 0) or 0), 2),
-                "adx": round(float(row.get("adx_14", 0) or 0), 2),
-                "daily_trend_ok": int((row.get("daily_trend_ok", 1.0) or 0) >= 0.5),
-            },
-        }
+    def on_trade_closed(self, state: dict, bar_index: int, reason: str) -> None:
+        state["cooldown_until_bar"] = bar_index + self.cfg.cooldown_bars
