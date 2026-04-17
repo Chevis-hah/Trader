@@ -404,3 +404,93 @@ class Storage:
         """整理数据库碎片"""
         with self._conn() as conn:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    # ==============================================================
+    # Universe / 数据质量辅助 (v2.3.1 新增)
+    # ==============================================================
+    def list_kline_symbols(self, interval: Optional[str] = None) -> list[str]:
+        """
+        返回 klines 表中已入库的 symbol 列表 (去重, 字典序)
+
+        Args:
+            interval: 若指定, 只返回在该 interval 上有数据的 symbol
+        """
+        query = "SELECT DISTINCT symbol FROM klines"
+        params: tuple = ()
+        if interval is not None:
+            query += " WHERE interval = ?"
+            params = (interval,)
+        query += " ORDER BY symbol ASC"
+        with self._conn() as conn:
+            cur = conn.execute(query, params)
+            return [row[0] for row in cur.fetchall()]
+
+    def get_kline_coverage(self, interval: str) -> pd.DataFrame:
+        """
+        返回每个 symbol 在指定 interval 上的数据覆盖情况
+
+        Returns:
+            DataFrame with columns: symbol, rows, first_time, last_time
+        """
+        query = """
+            SELECT symbol,
+                   COUNT(*) AS rows,
+                   MIN(open_time) AS first_time,
+                   MAX(open_time) AS last_time
+            FROM klines
+            WHERE interval = ?
+            GROUP BY symbol
+            ORDER BY rows DESC
+        """
+        with self._conn() as conn:
+            df = pd.read_sql_query(query, conn, params=(interval,))
+        return df
+
+    def check_kline_gaps(self, symbol: str, interval: str,
+                        expected_interval_ms: Optional[int] = None
+                        ) -> dict:
+        """
+        检测 K 线数据中的时间跳缺
+
+        Args:
+            symbol: 交易对
+            interval: 时间框架 (如 '1d')
+            expected_interval_ms: 期望的 bar 间隔毫秒数, 默认从 INTERVAL_MS 查
+
+        Returns:
+            {'total': N, 'gaps': [(from_ts, to_ts, missing_bars), ...],
+             'zero_vol_streak_max': int}
+        """
+        if expected_interval_ms is None:
+            expected_interval_ms = INTERVAL_MS.get(interval)
+            if expected_interval_ms is None:
+                raise ValueError(f"未知 interval: {interval}")
+
+        df = self.get_klines(symbol, interval)
+        if df.empty:
+            return {"total": 0, "gaps": [], "zero_vol_streak_max": 0}
+
+        total = len(df)
+        times = df["open_time"].tolist()
+        gaps: list[tuple[int, int, int]] = []
+        for i in range(1, len(times)):
+            delta = times[i] - times[i - 1]
+            if delta > expected_interval_ms * 1.5:
+                missing = int(delta / expected_interval_ms) - 1
+                gaps.append((times[i - 1], times[i], missing))
+
+        # 连续 0 成交量
+        zero_streak = 0
+        zero_streak_max = 0
+        for v in df["volume"].tolist():
+            if v == 0:
+                zero_streak += 1
+                zero_streak_max = max(zero_streak_max, zero_streak)
+            else:
+                zero_streak = 0
+
+        return {
+            "total": total,
+            "gaps": gaps,
+            "zero_vol_streak_max": zero_streak_max,
+        }

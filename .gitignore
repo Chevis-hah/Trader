@@ -1,20 +1,65 @@
-.venv/
+# ============================================================
+# Trader .gitignore
+# ============================================================
+
+# 环境变量 (含 API key)
+.env
+.env.local
+.env.*.local
+
+# Python
 __pycache__/
 *.py[cod]
-*.pyo
-.Python
+*$py.class
 *.so
-.env
-.env.*
-*.db
-data/*.db
-logs/*.log
-*.log
+*.egg
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+
+# Virtual envs
+venv/
+.venv/
+env/
+ENV/
+
+# IDE
 .idea/
 .vscode/
-*.zip
+*.swp
+*.swo
 .DS_Store
-Thumbs.db
-models/*.pkl
-models/*.joblib
-!models/.gitkeep
+
+# ============================================================
+# Trader 专用
+# ============================================================
+# 运行时数据 (体积大, 可通过 sync 脚本重建)
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/parquet/
+data/cache/
+
+# 日志
+logs/
+
+# 已归档的 v22 代码 (保留目录结构, 忽略内容以避免误改)
+# 如需恢复, 从 git 历史取
+# archive/   # 注释掉, 测试需要看到 archive 归档事实
+
+# Backtest 临时快照
+backtest_*_snapshot.txt
+
+# 分析产物中间件 (需要时手动 commit)
+analysis/output/tmp_*.json
+
+# 本地 repo snapshot (repo_to_file.py 产物)
+Trader_snapshot.txt
+*_snapshot.txt
+!backtest_*_snapshot.txt

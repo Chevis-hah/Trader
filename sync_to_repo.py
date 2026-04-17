@@ -220,6 +220,14 @@ def main():
 
     src_dir = Path(args.src_dir).resolve()
 
+    # 网页端下载常见为「外层文件夹 + 唯一 Trader/ 子树」；若直接以外层为源会把文件同步到仓库的 Trader/Trader/ 下
+    inner = src_dir / "Trader"
+    if inner.is_dir():
+        top = [p for p in src_dir.iterdir() if not p.name.startswith(".")]
+        if len(top) == 1 and top[0] == inner:
+            print(color(f"检测到单层补丁包装，源目录自动切换为: {inner}", CYAN))
+            src_dir = inner
+
     # 解析仓库路径: 指定 > 自动查找
     if args.repo:
         repo_dir = Path(args.repo).resolve()

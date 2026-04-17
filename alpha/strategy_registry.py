@@ -1,16 +1,23 @@
 """
-统一策略注册表 — v2.2
+统一策略注册表 — v2.3.1
 
-新增:
-- MeanReversionStrategy 注册
-- GridTradingStrategy 注册
+v2.3 变更:
+  - 移除 RegimeAdaptiveStrategy (已归档到 archive/v22_deprecated/)
+  - 保留策略: triple_ema / macd_momentum / mean_reversion
+  - 新增: cross_sectional_momentum (横截面, 组合级策略, 不走 TradingEngine 循环)
+
+v2.3.1 变更:
+  - 正式移除 regime 的导入 (P0-T01 的遗留清理)
+  - 加入 cross_sectional_momentum 到 SIMPLE_STRATEGIES (通过骨架实例化)
+  - 旧的 MACDMomentumStrategyConfig / TripleEMAStrategyConfig 名字保持向后兼容
+
+注册的策略会被 main.py / backtest_runner / TradingEngine 使用。
 """
 from __future__ import annotations
 from dataclasses import fields
 from typing import Any, Type
 
 from config.loader import Config, load_config
-from alpha.regime_strategy import RegimeAdaptiveStrategy, RegimeStrategyConfig
 from alpha.triple_ema_strategy import TripleEMAStrategy, TripleEMAStrategyConfig
 from alpha.macd_momentum_strategy import MACDMomentumStrategy, MACDMomentumStrategyConfig
 from alpha.mean_reversion_strategy import MeanReversionStrategy, MeanReversionConfig
@@ -21,17 +28,31 @@ try:
 except ImportError:
     _GRID_AVAILABLE = False
 
+try:
+    from alpha.cross_sectional_momentum import (
+        CrossSectionalMomentumStrategy,
+        CrossSectionalConfig,
+    )
+    _XS_AVAILABLE = True
+except ImportError:
+    _XS_AVAILABLE = False
 
+
+# 基于 config 的可配置策略 (TradingEngine 直接消费)
 STRATEGY_MAP: dict[str, tuple[type, Type]] = {
-    "regime": (RegimeAdaptiveStrategy, RegimeStrategyConfig),
     "triple_ema": (TripleEMAStrategy, TripleEMAStrategyConfig),
     "macd_momentum": (MACDMomentumStrategy, MACDMomentumStrategyConfig),
     "mean_reversion": (MeanReversionStrategy, MeanReversionConfig),
 }
 
-SIMPLE_STRATEGIES = {}
+# 无参数 / 自管理参数的策略
+SIMPLE_STRATEGIES: dict[str, type] = {}
 if _GRID_AVAILABLE:
     SIMPLE_STRATEGIES["grid"] = GridTradingStrategy
+# 横截面策略不走 single-symbol TradingEngine, 仅通过 cross_sectional_backtest 使用
+# 这里只注册以让 --list-strategies 可见
+if _XS_AVAILABLE:
+    SIMPLE_STRATEGIES["cross_sectional_momentum"] = CrossSectionalMomentumStrategy
 
 
 def available_strategies() -> list[str]:
@@ -42,9 +63,9 @@ def resolve_strategy_name(config=None, explicit_name=None) -> str:
     if explicit_name:
         name = explicit_name.strip().lower()
     elif config is not None and not isinstance(config, dict) and hasattr(config, "get_nested"):
-        name = str(config.get_nested("strategy.name", "triple_ema")).strip().lower()
+        name = str(config.get_nested("strategy.name", "macd_momentum")).strip().lower()
     else:
-        name = "triple_ema"
+        name = "macd_momentum"
     all_names = set(STRATEGY_MAP.keys()) | set(SIMPLE_STRATEGIES.keys())
     if name not in all_names:
         raise ValueError(f"未知策略: {name}. 可选: {', '.join(available_strategies())}")

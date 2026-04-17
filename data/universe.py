@@ -9,10 +9,16 @@ Universe 构建器 — 路线 A (横截面因子模型) 基础设施
 
 数据要求:
   - OHLCV 数据表 (来自 data/storage.py)
-  - 可选: 市值数据表 (若无，退化为 volume-based 排序)
+  - 可选: 市值数据表 (若无, 退化为 volume-based 排序)
+
+v2.3.1 修复:
+  - _build_universe 不再用 `limit=50` 截断历史数据, 改为 start_time 过滤到 as_of_date
+    (原实现与 min_history_days=180 直接冲突, 导致任何 as_of_date 都拿不到足够窗口)
+  - get_all_symbols 优先从 storage 读已入库的 symbol 列表, 不再走硬编码 fallback
+  - 缓存 key 增加 config 指纹, 避免同一 builder 切参数时命中过期缓存
 
 使用示例:
-  >>> builder = UniverseBuilder(storage, top_n=50)
+  >>> builder = UniverseBuilder(storage, UniverseConfig(top_n=50))
   >>> universe_at_t = builder.get_universe('2023-06-01')
   >>> # → ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', ...] 共 50 个
 """
@@ -37,6 +43,8 @@ class UniverseConfig:
     min_history_days: int = 180               # 至少有 N 日历史数据
     rebalance_freq_days: int = 7              # Universe 每 N 天重新排序
     turnover_smoothing: int = 2               # 候选币种需连续 N 个 rebalance 入围才纳入
+    # 查询窗口: 覆盖 min_history_days 但不过长, 避免把整个历史都拉回来
+    lookback_buffer_days: int = 30            # 在 min_history_days 基础上再多留的缓冲天数
 
 
 class UniverseBuilder:
@@ -48,16 +56,32 @@ class UniverseBuilder:
       - 必须用 "当时的 Top 50" 才有统计效度
     """
 
+    # 当 storage 里还没数据时使用的硬编码候选池 (仅用于首轮 sync-universe-data 启动)
+    _BOOTSTRAP_SYMBOLS = [
+        "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+        "ADAUSDT", "DOGEUSDT", "TRXUSDT", "AVAXUSDT", "DOTUSDT",
+        "LINKUSDT", "MATICUSDT", "LTCUSDT", "BCHUSDT", "UNIUSDT",
+        "ATOMUSDT", "ETCUSDT", "XLMUSDT", "FILUSDT", "NEARUSDT",
+        "APTUSDT", "ARBUSDT", "OPUSDT", "INJUSDT", "SUIUSDT",
+        "TIAUSDT", "SEIUSDT", "AAVEUSDT", "MKRUSDT", "GRTUSDT",
+        "SANDUSDT", "MANAUSDT", "AXSUSDT", "FLOWUSDT", "ALGOUSDT",
+        "HBARUSDT", "VETUSDT", "EOSUSDT", "XTZUSDT", "EGLDUSDT",
+        "ICPUSDT", "FTMUSDT", "ROSEUSDT", "THETAUSDT", "KAVAUSDT",
+        "CRVUSDT", "SNXUSDT", "COMPUSDT", "CHZUSDT", "RUNEUSDT",
+        "IMXUSDT", "FETUSDT", "RNDRUSDT", "GALAUSDT", "LDOUSDT",
+        "PYTHUSDT", "JUPUSDT", "WIFUSDT", "PEPEUSDT", "ENAUSDT",
+    ]
+
     def __init__(self, storage, config: Optional[UniverseConfig] = None):
         """
         Args:
-            storage: data.storage.Storage 实例，提供 get_klines() 接口
+            storage: data.storage.Storage 实例
             config: UniverseConfig
         """
         self.storage = storage
         self.cfg = config or UniverseConfig()
-        self._cache: dict[str, list[str]] = {}        # date_str → universe list
-        self._candidate_history: dict[str, int] = {}  # symbol → 连续入围次数
+        self._cache: dict[tuple, list[str]] = {}
+        self._candidate_history: dict[str, int] = {}
 
     # ----------------------------------------------------------------
     # 对外主接口
@@ -70,38 +94,39 @@ class UniverseBuilder:
             as_of_date: 'YYYY-MM-DD' 格式
 
         Returns:
-            按市值或成交量从大到小排序的 symbol 列表
+            按成交额从大到小排序的 symbol 列表
         """
-        if as_of_date in self._cache:
-            return self._cache[as_of_date]
+        key = (as_of_date, self.cfg.top_n, self.cfg.min_volume_30d_usd,
+               self.cfg.min_history_days)
+        if key in self._cache:
+            return self._cache[key]
 
         universe = self._build_universe(as_of_date)
-        self._cache[as_of_date] = universe
+        self._cache[key] = universe
         return universe
 
     def get_all_symbols(self) -> list[str]:
         """
-        返回 storage 中所有可用 symbols (辅助方法)
-        """
-        if hasattr(self.storage, "get_symbols"):
-            return self.storage.get_symbols()
+        返回候选 symbol 池
 
-        # Fallback: 硬编码 Top 60 by mcap (2025-2026)
-        # 实际使用时应该从 storage 动态读取
-        return [
-            "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
-            "ADAUSDT", "DOGEUSDT", "TRXUSDT", "AVAXUSDT", "DOTUSDT",
-            "LINKUSDT", "MATICUSDT", "LTCUSDT", "BCHUSDT", "UNIUSDT",
-            "ATOMUSDT", "ETCUSDT", "XLMUSDT", "FILUSDT", "NEARUSDT",
-            "APTUSDT", "ARBUSDT", "OPUSDT", "INJUSDT", "SUIUSDT",
-            "TIAUSDT", "SEIUSDT", "AAVEUSDT", "MKRUSDT", "GRTUSDT",
-            "SANDUSDT", "MANAUSDT", "AXSUSDT", "FLOWUSDT", "ALGOUSDT",
-            "HBARUSDT", "VETUSDT", "EOSUSDT", "XTZUSDT", "EGLDUSDT",
-            "ICPUSDT", "FTMUSDT", "ROSEUSDT", "THETAUSDT", "KAVAUSDT",
-            "CRVUSDT", "SNXUSDT", "COMPUSDT", "CHZUSDT", "RUNEUSDT",
-            "IMXUSDT", "FETUSDT", "RNDRUSDT", "GALAUSDT", "LDOUSDT",
-            "PYTHUSDT", "JUPUSDT", "WIFUSDT", "PEPEUSDT", "ENAUSDT",
-        ]
+        优先级:
+          1. storage.list_kline_symbols('1d')  — 已入库的真实 symbols
+          2. bootstrap 硬编码池 (首轮 sync 前)
+        """
+        try:
+            if hasattr(self.storage, "list_kline_symbols"):
+                symbols = self.storage.list_kline_symbols(interval="1d")
+                if symbols:
+                    return symbols
+        except Exception as e:
+            logger.debug(f"list_kline_symbols failed, fallback to bootstrap: {e}")
+
+        return list(self._BOOTSTRAP_SYMBOLS)
+
+    def clear_cache(self) -> None:
+        """手动清空 universe / smoothing 缓存 (测试用)"""
+        self._cache.clear()
+        self._candidate_history.clear()
 
     # ----------------------------------------------------------------
     # 内部逻辑
@@ -115,29 +140,42 @@ class UniverseBuilder:
           - 避免对外部市值数据源的依赖
         """
         all_symbols = self.get_all_symbols()
-        as_of_ts = pd.Timestamp(as_of_date)
+        as_of_ts = pd.Timestamp(as_of_date, tz="UTC").tz_localize(None) \
+            if pd.Timestamp(as_of_date).tzinfo is None \
+            else pd.Timestamp(as_of_date).tz_convert("UTC").tz_localize(None)
+
+        # 只拉 as_of_date 之前 min_history_days+buffer 天的数据
+        lookback_days = self.cfg.min_history_days + self.cfg.lookback_buffer_days
+        end_ms = int(as_of_ts.timestamp() * 1000)
+        start_ms = end_ms - lookback_days * 86_400_000
 
         ranked: list[tuple[str, float]] = []
 
         for symbol in all_symbols:
             try:
-                klines = self.storage.get_klines(symbol, "1d", limit=50)
-                if klines.empty or len(klines) < self.cfg.min_history_days:
+                klines = self.storage.get_klines(
+                    symbol, "1d",
+                    start_time=start_ms,
+                    end_time=end_ms,
+                )
+                if klines.empty:
+                    continue
+                if len(klines) < self.cfg.min_history_days:
                     continue
 
-                # 只用 as_of_date 之前的数据 (避免 lookahead)
-                klines["ts"] = pd.to_datetime(klines["open_time"], unit="ms")
-                klines = klines[klines["ts"] <= as_of_ts]
-
-                if len(klines) < 30:
-                    continue
-
+                # 数据库是升序的, 直接取最后 30 行
                 last_30 = klines.tail(30)
-                # 日成交额 = close * volume
                 if "close" not in last_30.columns or "volume" not in last_30.columns:
                     continue
 
-                daily_turnover_usd = (last_30["close"] * last_30["volume"]).mean()
+                # 优先使用 quote_volume (USD 计价), 退化到 close*volume
+                if "quote_volume" in last_30.columns and last_30["quote_volume"].sum() > 0:
+                    daily_turnover_usd = float(last_30["quote_volume"].mean())
+                else:
+                    daily_turnover_usd = float(
+                        (last_30["close"] * last_30["volume"]).mean()
+                    )
+
                 if daily_turnover_usd < self.cfg.min_volume_30d_usd:
                     continue
 
@@ -147,41 +185,34 @@ class UniverseBuilder:
                 logger.debug(f"skip {symbol}: {e}")
                 continue
 
-        # 按成交额降序
         ranked.sort(key=lambda x: x[1], reverse=True)
         top_candidates = [s for s, _ in ranked[: self.cfg.top_n * 2]]
 
-        # Turnover smoothing: 连续 N 次入围才纳入
         universe = self._apply_smoothing(top_candidates)
-
         return universe[: self.cfg.top_n]
 
     def _apply_smoothing(self, candidates: list[str]) -> list[str]:
         """避免因临时流动性尖峰 (如 memecoin) 污染 universe"""
         smoothing = self.cfg.turnover_smoothing
-        result = []
 
+        # 入围 +1
         for symbol in candidates:
             self._candidate_history[symbol] = (
                 self._candidate_history.get(symbol, 0) + 1
             )
 
-        # 清理不再入围的币种记录
+        # 非入围 -1 (衰减而非归零, 避免抖动)
         candidate_set = set(candidates)
         for symbol in list(self._candidate_history.keys()):
             if symbol not in candidate_set:
-                # 衰减而非立刻归零，避免抖动
                 self._candidate_history[symbol] -= 1
                 if self._candidate_history[symbol] <= 0:
                     del self._candidate_history[symbol]
 
-        # 连续入围次数 >= smoothing 的币种进入 universe
-        for symbol in candidates:
-            if self._candidate_history.get(symbol, 0) >= smoothing:
-                result.append(symbol)
+        result = [s for s in candidates
+                  if self._candidate_history.get(s, 0) >= smoothing]
 
-        # 如果 smoothing 过滤掉太多，回退到原始列表
+        # 如果 smoothing 过滤掉太多 (冷启动), 回退到原始列表
         if len(result) < self.cfg.top_n * 0.5:
             return candidates
-
         return result
