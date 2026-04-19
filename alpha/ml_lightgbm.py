@@ -60,12 +60,23 @@ EXTENDED_FEATURES = [
 
 
 def _try_import_lgbm():
-    """尝试导入 LightGBM，失败则降级到 sklearn"""
+    """
+    尝试导入 LightGBM，失败则降级到 sklearn。
+
+    除了 ImportError (未安装) 外, 还需捕获 OSError —— WSL/Debian 上 `pip install lightgbm`
+    成功但系统缺少 `libgomp.so.1` 时, import 会抛 OSError。本地 agent 反馈修复 (2026-04-19)。
+    """
     try:
         import lightgbm as lgb
         return lgb, True
     except ImportError:
         logger.warning("LightGBM 未安装，降级到 sklearn GradientBoosting")
+        return None, False
+    except OSError as e:
+        logger.warning(
+            f"LightGBM 原生库加载失败 ({e}), 降级到 sklearn。"
+            f"若需使用 LightGBM, 在 Debian/WSL 上运行: bash scripts/install_debian_test_deps.sh"
+        )
         return None, False
 
 

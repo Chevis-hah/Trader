@@ -7,7 +7,7 @@
 - VaR 计算
 """
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import deque
 from typing import Optional
 
@@ -44,9 +44,9 @@ class RiskManager:
         # 状态
         self.peak_nav = initial_capital
         self.daily_start_nav = initial_capital
-        self.daily_start_date = datetime.utcnow().date()
+        self.daily_start_date = datetime.now(timezone.utc).date()
         self.weekly_start_nav = initial_capital
-        self.weekly_start_date = datetime.utcnow().date()
+        self.weekly_start_date = datetime.now(timezone.utc).date()
 
         # 熔断
         self.circuit_breaker_active = False
@@ -74,7 +74,7 @@ class RiskManager:
         """
         # 0. 熔断检查
         if self.circuit_breaker_active:
-            if self.circuit_breaker_until and datetime.utcnow() < self.circuit_breaker_until:
+            if self.circuit_breaker_until and datetime.now(timezone.utc) < self.circuit_breaker_until:
                 return False, f"熔断中，冷却至 {self.circuit_breaker_until.isoformat()}"
             else:
                 self._deactivate_circuit_breaker()
@@ -268,7 +268,7 @@ class RiskManager:
     def _activate_circuit_breaker(self, reason: str):
         cooldown = self._get("circuit_breaker", "cooldown_hours", 4)
         self.circuit_breaker_active = True
-        self.circuit_breaker_until = datetime.utcnow() + timedelta(hours=cooldown)
+        self.circuit_breaker_until = datetime.now(timezone.utc) + timedelta(hours=cooldown)
         logger.critical(f"🚨 熔断触发: {reason} | 冷却至 {self.circuit_breaker_until}")
         self.event_bus.publish(Event(
             type=EventType.CIRCUIT_BREAKER_ON,
@@ -287,7 +287,7 @@ class RiskManager:
     # 辅助
     # ==============================================================
     def _check_period_reset(self, nav: float):
-        today = datetime.utcnow().date()
+        today = datetime.now(timezone.utc).date()
         if today != self.daily_start_date:
             self.daily_start_nav = nav
             self.daily_start_date = today

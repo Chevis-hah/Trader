@@ -8,7 +8,7 @@ import logging
 import json
 import sys
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 
@@ -16,7 +16,7 @@ class JsonFormatter(logging.Formatter):
     """JSON 结构化日志格式"""
     def format(self, record):
         log_entry = {
-            "ts": datetime.utcnow().isoformat() + "Z",
+            "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "level": record.levelname,
             "logger": record.name,
             "msg": record.getMessage(),

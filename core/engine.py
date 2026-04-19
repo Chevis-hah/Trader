@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import numpy as np
@@ -144,7 +144,7 @@ class TradingEngine:
     def run_cycle(self):
         self.cycle_count += 1
         logger.info(f"\n{'━' * 60}")
-        logger.info(f"交易循环 #{self.cycle_count} | {datetime.utcnow().isoformat()}Z")
+        logger.info(f"交易循环 #{self.cycle_count} | {datetime.now(timezone.utc).isoformat()}Z")
         logger.info(f"{'━' * 60}")
 
         self._update_data()
@@ -303,7 +303,7 @@ class TradingEngine:
                     "qty": result.get("executed_qty", qty),
                     "entry_price": result.get("avg_fill_price", current_price),
                     "entry_bar": state["bar_index"],
-                    "entry_time": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+                    "entry_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
                     "stop_loss": stop_loss,
                     "highest_since_entry": current_price,
                     "lowest_since_entry": current_price,
